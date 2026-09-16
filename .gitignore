@@ -1,0 +1,18 @@
+# 构建产物
+bin/
+obj/
+publish/
+artifacts/
+*.exe
+*.msi
+
+# IDE
+.vs/
+.idea/
+.vscode/
+*.user
+*.suo
+
+# 系统
+Thumbs.db
+desktop.ini
