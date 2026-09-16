@@ -4,7 +4,7 @@
 ;            -p:PublishSingleFile=false -o artifacts\publish-selfcontained
 
 #define MyAppName "ExplorerDock"
-#define MyAppVersion "1.0.5"
+#define MyAppVersion "1.0.7"
 #define MyAppPublisher "v4806"
 #define MyAppURL "https://github.com/v4806/ExplorerDock"
 #define MyAppExeName "ExplorerDock.exe"
@@ -63,4 +63,6 @@ Filename: "{app}\{#MyAppExeName}"; Parameters: "--quit"; Flags: runhidden waitun
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
+
+
 

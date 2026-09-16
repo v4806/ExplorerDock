@@ -30,7 +30,6 @@ public partial class DockWindow : Window
     private DateTime _lastTopmostFix = DateTime.MinValue;
     private bool _dragging;
     private IntPtr _lastActiveFolder;
-    private AltTabProxyWindow? _altTabProxy;
 
     private Brush _backgroundBrush = Brushes.Transparent;
     private Brush _borderBrush = Brushes.Transparent;
@@ -105,22 +104,31 @@ public partial class DockWindow : Window
     }
 
     /// <summary>
-    /// 悬浮栏自己从 ALT+TAB 里退出去（加 WS_EX_TOOLWINDOW），
-    /// 改由 <see cref="AltTabProxyWindow"/> 当替身：它显示最后在用的文件夹窗口的实时画面，
-    /// 选中它就跳回那个文件夹窗口。
+    /// ALT+TAB 里的那一项就是悬浮栏自己（顺序由系统按使用历史维护）。
+    /// 从 ALT+TAB 切过来时，立刻把焦点交给最后在用的那个文件夹窗口 ——
+    /// 相当于"切到这一项 = 切回最近用的文件夹"。
+    /// 鼠标直接点进来（准备点某个按钮）则不跳转。
     /// </summary>
-    protected override void OnSourceInitialized(EventArgs e)
+    protected override void OnActivated(EventArgs e)
     {
-        base.OnSourceInitialized(e);
+        base.OnActivated(e);
 
-        var handle = new WindowInteropHelper(this).Handle;
-        if (handle == IntPtr.Zero) return;
+        Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (!NativeMethods.GetCursorPos(out var cursor)) return;
 
-        long style = NativeMethods.GetWindowLongPtr(handle, NativeMethods.GWL_EXSTYLE);
-        NativeMethods.SetWindowLongPtr(
-            handle,
-            NativeMethods.GWL_EXSTYLE,
-            (style | NativeMethods.WS_EX_TOOLWINDOW) & ~NativeMethods.WS_EX_APPWINDOW);
+            var origin = PointToScreen(new Point(0, 0));
+            bool mouseOnDock =
+                cursor.X >= origin.X - 2 && cursor.X <= origin.X + ActualWidth + 2 &&
+                cursor.Y >= origin.Y - 2 && cursor.Y <= origin.Y + ActualHeight + 2;
+
+            if (mouseOnDock) return;
+
+            var target = _lastActiveFolder;
+            if (target == IntPtr.Zero || !NativeMethods.IsWindow(target)) return;
+
+            Activate(target);
+        }), DispatcherPriority.Background);
     }
 
     // ---------- 外观 ----------
@@ -391,23 +399,6 @@ public partial class DockWindow : Window
         return new WindowInteropHelper(_shadow).Handle;
     }
 
-    /// <summary>ALT+TAB 替身：显示最后在用文件夹窗口的画面，选中即跳回它。</summary>
-    private void EnsureAltTabProxy()
-    {
-        if (_altTabProxy is not null) return;
-
-        _altTabProxy = new AltTabProxyWindow();
-        _altTabProxy.Activated += (_, _) =>
-        {
-            var target = _altTabProxy.TargetHandle;
-            if (target == IntPtr.Zero || !NativeMethods.IsWindow(target)) return;
-            Activate(target);
-        };
-
-        // 注意：这里不 Show()。要等 AttachTo 把标题设成文件夹名之后再显示，
-        // 否则 ALT+TAB 会一直用首次登记时的默认标题。
-    }
-
     /// <summary>
     /// 把悬浮栏限制在屏幕范围内：四周都保加强制间距，
     /// 既不能被拖出屏幕被裁掉，也不能贴死在屏幕边缘上。
@@ -525,52 +516,11 @@ public partial class DockWindow : Window
             _activeWindow = snapshot.Foreground;
         }
 
-        // 单独记下"最后在用的文件夹窗口"：ALT+TAB 替身要显示它、切到它
+        // 记下"最后在用的文件夹窗口"：从 ALT+TAB 切回悬浮栏时要跳回它
         if (snapshot.Foreground != IntPtr.Zero &&
             snapshot.Windows.Any(w => w.Handle == snapshot.Foreground))
         {
             _lastActiveFolder = snapshot.Foreground;
-            EnsureAltTabProxy();
-        }
-
-        // 还没记录过"最后在用"的文件夹时，先拿列表里第一个顶上，
-        // 保证 ALT+TAB 替身一启动就有内容
-        if (_lastActiveFolder == IntPtr.Zero && snapshot.Windows.Count > 0)
-        {
-            _lastActiveFolder = snapshot.Windows[0].Handle;
-            EnsureAltTabProxy();
-        }
-
-        if (_altTabProxy is not null && _lastActiveFolder != IntPtr.Zero)
-        {
-            var info = snapshot.Windows.FirstOrDefault(w => w.Handle == _lastActiveFolder);
-            _altTabProxy.AttachTo(_lastActiveFolder, info?.Title ?? "文件夹");
-
-            // 关键：先把标题设成文件夹名，再让窗口第一次出现 ——
-            // ALT+TAB 只在窗口首次登记时读一次标题，之后再改它不会刷新
-            if (!_altTabProxy.IsVisible)
-            {
-                _altTabProxy.Show();
-
-                // 对"尚未显示"的窗口注册 DWM 缩略图是不生效的（ALT+TAB 会是黑块），
-                // 所以显示之后重新注册一次
-                var proxy = _altTabProxy;
-                var target = _lastActiveFolder;
-                var title = info?.Title ?? "文件夹";
-                Dispatcher.BeginInvoke(new Action(() =>
-                {
-                    proxy.Detach();
-                    proxy.AttachTo(target, title);
-                }), DispatcherPriority.Background);
-            }
-            else
-            {
-                _altTabProxy.UpdateThumbnail();
-            }
-
-            // ALT+TAB 的顺序就是 Z 序：每次换文件夹就把替身提到最前，
-            // 让它在列表里待在"最近使用"的位置，而不是一直垫底
-            _altTabProxy.BringToFront();
         }
 
         var seen = new HashSet<IntPtr>();
@@ -800,13 +750,7 @@ public partial class DockWindow : Window
         var ok = NativeMethods.ForceForeground(hwnd);
         Diag($"activate: target=0x{hwnd.ToInt64():X} ok={ok} fg=0x{NativeMethods.GetForegroundWindow().ToInt64():X}");
 
-        if (ok)
-        {
-            SetActiveWindow(hwnd);
-
-            // 让 ALT+TAB 里的替身排到"最近使用"的位置
-            _altTabProxy?.Touch();
-        }
+        if (ok) SetActiveWindow(hwnd);
     }
 
     /// <summary>立刻刷新高亮，不必等下一轮轮询。</summary>
