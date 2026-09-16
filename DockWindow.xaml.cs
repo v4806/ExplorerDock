@@ -115,16 +115,16 @@ public partial class DockWindow : Window
 
         Dispatcher.BeginInvoke(new Action(() =>
         {
-            if (!NativeMethods.GetCursorPos(out var cursor)) return;
-
-            var origin = PointToScreen(new Point(0, 0));
-            bool mouseOnDock =
-                cursor.X >= origin.X - 2 && cursor.X <= origin.X + ActualWidth + 2 &&
-                cursor.Y >= origin.Y - 2 && cursor.Y <= origin.Y + ActualHeight + 2;
-
-            if (mouseOnDock) return;
+            // 鼠标按着左键进来 = 用户要点悬浮栏上的按钮，留在悬浮栏
+            if (Mouse.LeftButton == MouseButtonState.Pressed)
+            {
+                Diag("activated by mouse click, stay");
+                return;
+            }
 
             var target = _lastActiveFolder;
+            Diag($"activated (alt-tab?): target=0x{target.ToInt64():X} valid={NativeMethods.IsWindow(target)}");
+
             if (target == IntPtr.Zero || !NativeMethods.IsWindow(target)) return;
 
             Activate(target);
