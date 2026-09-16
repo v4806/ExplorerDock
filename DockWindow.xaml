@@ -16,7 +16,7 @@
          点悬浮栏旁边的空白会被吃掉。窗口尺寸 == 可见范围。 -->
     <Border x:Name="RootBorder"
             CornerRadius="9"
-            BorderThickness="1.5"
+            BorderThickness="2"
             Padding="4,3">
         <StackPanel x:Name="RootPanel" Orientation="Horizontal" VerticalAlignment="Center" />
     </Border>

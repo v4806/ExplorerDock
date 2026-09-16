@@ -10,10 +10,14 @@ public sealed class TrayIconManager : IDisposable
 {
     private readonly App _app;
     private readonly NotifyIcon _notifyIcon;
+    private readonly ContextMenuStrip _menu;
     private readonly ToolStripMenuItem _showDockItem;
     private readonly ToolStripMenuItem _takeoverItem;
     private readonly ToolStripMenuItem _hideWhenEmptyItem;
     private readonly ToolStripMenuItem _startupItem;
+    private readonly ToolStripMenuItem _themeAutoItem;
+    private readonly ToolStripMenuItem _themeDarkItem;
+    private readonly ToolStripMenuItem _themeLightItem;
 
     public TrayIconManager(App app)
     {
@@ -31,7 +35,16 @@ public sealed class TrayIconManager : IDisposable
         _startupItem = new ToolStripMenuItem("开机自动启动");
         _startupItem.Click += (_, _) => _app.SetRunAtStartup(!App.Settings.RunAtStartup);
 
-        var menu = new ContextMenuStrip
+        _themeAutoItem = new ToolStripMenuItem("主题：跟随系统");
+        _themeAutoItem.Click += (_, _) => _app.SetTheme(DockTheme.Auto);
+
+        _themeDarkItem = new ToolStripMenuItem("主题：深色");
+        _themeDarkItem.Click += (_, _) => _app.SetTheme(DockTheme.Dark);
+
+        _themeLightItem = new ToolStripMenuItem("主题：浅色");
+        _themeLightItem.Click += (_, _) => _app.SetTheme(DockTheme.Light);
+
+        _menu = new ContextMenuStrip
         {
             ShowImageMargin = false,
             Renderer = new DarkMenuRenderer(),
@@ -39,32 +52,47 @@ public sealed class TrayIconManager : IDisposable
             ForeColor = Color.FromArgb(242, 242, 242),
             Font = new Font("Microsoft YaHei UI", 9f),
         };
-        menu.Items.Add(_showDockItem);
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(_takeoverItem);
-        menu.Items.Add(_hideWhenEmptyItem);
-        menu.Items.Add(_startupItem);
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(new ToolStripMenuItem("回到屏幕底部居中", null, (_, _) => _app.ResetDockPosition()));
-        menu.Items.Add(new ToolStripMenuItem("把窗口还原到任务栏", null, (_, _) => _app.RestoreAllToTaskbar()));
-        menu.Items.Add(new ToolStripMenuItem("关闭所有文件夹窗口", null, (_, _) => App.CloseAllExplorerWindows()));
-        menu.Items.Add(new ToolStripMenuItem("重启资源管理器", null, (_, _) => App.RestartExplorer()));
-        menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add(new ToolStripMenuItem("退出 ExplorerDock", null, (_, _) => _app.ExitApp()));
+        _menu.Items.Add(_showDockItem);
+        _menu.Items.Add(new ToolStripSeparator());
+        _menu.Items.Add(_takeoverItem);
+        _menu.Items.Add(_hideWhenEmptyItem);
+        _menu.Items.Add(_startupItem);
+        _menu.Items.Add(new ToolStripSeparator());
+        _menu.Items.Add(_themeAutoItem);
+        _menu.Items.Add(_themeDarkItem);
+        _menu.Items.Add(_themeLightItem);
+        _menu.Items.Add(new ToolStripSeparator());
+        _menu.Items.Add(new ToolStripMenuItem("回到屏幕顶部居中", null, (_, _) => _app.ResetDockPosition()));
+        _menu.Items.Add(new ToolStripMenuItem("把窗口还原到任务栏", null, (_, _) => _app.RestoreAllToTaskbar()));
+        _menu.Items.Add(new ToolStripMenuItem("关闭所有文件夹窗口", null, (_, _) => App.CloseAllExplorerWindows()));
+        _menu.Items.Add(new ToolStripMenuItem("重启资源管理器", null, (_, _) => App.RestartExplorer()));
+        _menu.Items.Add(new ToolStripSeparator());
+        _menu.Items.Add(new ToolStripMenuItem("退出 ExplorerDock", null, (_, _) => _app.ExitApp()));
 
-        menu.Opening += (_, _) => RefreshChecks();
+        _menu.Opening += (_, _) => RefreshChecks();
 
         _notifyIcon = new NotifyIcon
         {
             Text = "ExplorerDock — 文件夹悬浮栏",
             Icon = LoadIcon(),
-            ContextMenuStrip = menu,
+            ContextMenuStrip = _menu,
             Visible = true,
         };
 
         _notifyIcon.DoubleClick += (_, _) => _app.SetShowDock(!App.Settings.ShowDock);
 
         RefreshChecks();
+        ApplyTheme();
+    }
+
+    /// <summary>托盘菜单跟随主题：深色用自定义渲染器，浅色交回系统默认。</summary>
+    public void ApplyTheme()
+    {
+        bool light = App.Settings.ResolveLightTheme();
+
+        _menu.Renderer = light ? new ToolStripProfessionalRenderer() : new DarkMenuRenderer();
+        _menu.BackColor = light ? Color.FromArgb(0xF7, 0xF7, 0xF8) : Color.FromArgb(27, 27, 31);
+        _menu.ForeColor = light ? Color.FromArgb(26, 26, 26) : Color.FromArgb(242, 242, 242);
     }
 
     private void RefreshChecks()
@@ -73,6 +101,9 @@ public sealed class TrayIconManager : IDisposable
         _takeoverItem.Checked = App.Settings.TakeoverEnabled;
         _hideWhenEmptyItem.Checked = App.Settings.HideWhenEmpty;
         _startupItem.Checked = App.Settings.RunAtStartup;
+        _themeAutoItem.Checked = App.Settings.Theme == DockTheme.Auto;
+        _themeDarkItem.Checked = App.Settings.Theme == DockTheme.Dark;
+        _themeLightItem.Checked = App.Settings.Theme == DockTheme.Light;
     }
 
     private static Icon LoadIcon()

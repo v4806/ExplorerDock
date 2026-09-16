@@ -15,7 +15,7 @@ namespace ExplorerDock;
 internal sealed class ShadowWindow : Window
 {
     /// <summary>阴影需要的外扩空间（给 BlurRadius + ShadowDepth 留的）。</summary>
-    public const double ShadowMargin = 24;
+    public const double ShadowMargin = 30;
 
     private readonly Border _shape;
 
@@ -34,6 +34,8 @@ internal sealed class ShadowWindow : Window
         _shape = new Border
         {
             Background = new SolidColorBrush(Color.FromArgb(0xFF, 0x1B, 0x1B, 0x1F)),
+            BorderBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0x1B, 0x1B, 0x1F)),
+            BorderThickness = new Thickness(2),
             CornerRadius = new CornerRadius(9),
             Margin = new Thickness(ShadowMargin),
             Effect = new DropShadowEffect
@@ -50,10 +52,30 @@ internal sealed class ShadowWindow : Window
         Content = _shape;
     }
 
-    public void SetTone(Color background, double cornerRadius)
+    public void SetTone(Color background, double cornerRadius, bool light)
     {
-        _shape.Background = new SolidColorBrush(background);
+        // 背景和描边同色：这一层要和悬浮栏完全重合，两层的圆角抗锯齿叠在一起，
+        // 边框边缘（尤其四角）才会显得实，不会因为单层抗锯齿而发虚
+        var brush = new SolidColorBrush(background);
+        _shape.Background = brush;
+        _shape.BorderBrush = brush;
         _shape.CornerRadius = new CornerRadius(cornerRadius);
+
+        if (_shape.Effect is DropShadowEffect shadow)
+        {
+            shadow.Opacity = light ? 0.50 : 0.62;
+            shadow.BlurRadius = light ? 22 : 20;
+            shadow.ShadowDepth = light ? 5 : 4;
+        }
+    }
+
+    /// <summary>
+    /// 阴影矩形相对悬浮栏的内缩量。保持 0：两层必须像素级重合，
+    /// 一旦错开，四角就会出现两层弧线的"重影"，看起来就是边框发虚。
+    /// </summary>
+    public void SetInset(double inset)
+    {
+        _shape.Margin = new Thickness(ShadowMargin + inset);
     }
 
     protected override void OnSourceInitialized(EventArgs e)

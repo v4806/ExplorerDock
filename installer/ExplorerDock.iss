@@ -4,7 +4,7 @@
 ;            -p:PublishSingleFile=false -o artifacts\publish-selfcontained
 
 #define MyAppName "ExplorerDock"
-#define MyAppVersion "1.0.1"
+#define MyAppVersion "1.0.2"
 #define MyAppPublisher "v4806"
 #define MyAppURL "https://github.com/v4806/ExplorerDock"
 #define MyAppExeName "ExplorerDock.exe"

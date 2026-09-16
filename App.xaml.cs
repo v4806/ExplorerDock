@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Threading;
 using System.Windows;
+using System.Windows.Media;
 using ExplorerDock.Interop;
 using ExplorerDock.Models;
 using ExplorerDock.Services;
@@ -59,6 +60,7 @@ public partial class App : Application
 
         Settings = Settings.Load();
         _taskbar = new TaskbarTweaker();
+        ApplyMenuTheme();
         ApplyStartupRegistration();
 
         // 应急出口：ExplorerDock.exe --restore 把所有文件夹按钮还给任务栏后退出
@@ -229,6 +231,45 @@ public partial class App : Application
         catch
         {
             // 写注册表失败（极少见）时忽略
+        }
+    }
+
+    // ---------- 主题 ----------
+
+    /// <summary>切换配色方案（跟随系统 / 深色 / 浅色）。</summary>
+    public void SetTheme(DockTheme theme)
+    {
+        Settings.Theme = theme;
+        Settings.Save();
+
+        ApplyMenuTheme();
+        Dock?.ApplyThemeAndRebuild();
+        _tray?.ApplyTheme();
+    }
+
+    /// <summary>菜单与提示气泡的配色走 DynamicResource，这里整体换一套刷子。</summary>
+    public static void ApplyMenuTheme()
+    {
+        bool light = Settings.ResolveLightTheme();
+        var resources = Current.Resources;
+
+        if (light)
+        {
+            resources["DockMenuBackground"] = new SolidColorBrush(Color.FromArgb(0xFA, 0xFA, 0xFA, 0xFA));
+            resources["DockMenuBorder"] = new SolidColorBrush(Color.FromArgb(0xFF, 0x24, 0x24, 0x24));
+            resources["DockMenuForeground"] = new SolidColorBrush(Color.FromArgb(0xFF, 0x1A, 0x1A, 0x1A));
+            resources["DockMenuHighlight"] = new SolidColorBrush(Color.FromArgb(0x24, 0x00, 0x00, 0x00));
+            resources["DockMenuDisabled"] = new SolidColorBrush(Color.FromArgb(0x66, 0x00, 0x00, 0x00));
+            resources["DockMenuSeparator"] = new SolidColorBrush(Color.FromArgb(0x33, 0x00, 0x00, 0x00));
+        }
+        else
+        {
+            resources["DockMenuBackground"] = new SolidColorBrush(Color.FromArgb(0xF2, 0x1B, 0x1B, 0x1F));
+            resources["DockMenuBorder"] = new SolidColorBrush(Color.FromArgb(0x33, 0xFF, 0xFF, 0xFF));
+            resources["DockMenuForeground"] = new SolidColorBrush(Color.FromArgb(0xFF, 0xF2, 0xF2, 0xF2));
+            resources["DockMenuHighlight"] = new SolidColorBrush(Color.FromArgb(0x26, 0xFF, 0xFF, 0xFF));
+            resources["DockMenuDisabled"] = new SolidColorBrush(Color.FromArgb(0x5C, 0xFF, 0xFF, 0xFF));
+            resources["DockMenuSeparator"] = new SolidColorBrush(Color.FromArgb(0x1F, 0xFF, 0xFF, 0xFF));
         }
     }
 

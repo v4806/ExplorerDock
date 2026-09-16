@@ -13,7 +13,7 @@
         <SolidColorBrush x:Key="DockMenuSeparator" Color="#1FFFFFFF" />
 
         <Style TargetType="{x:Type ContextMenu}">
-            <Setter Property="Foreground" Value="{StaticResource DockMenuForeground}" />
+            <Setter Property="Foreground" Value="{DynamicResource DockMenuForeground}" />
             <Setter Property="FontFamily" Value="Microsoft YaHei UI, Segoe UI" />
             <Setter Property="FontSize" Value="12.5" />
             <Setter Property="SnapsToDevicePixels" Value="True" />
@@ -24,8 +24,8 @@
                         <Border Margin="10"
                                 Padding="6"
                                 CornerRadius="10"
-                                Background="{StaticResource DockMenuBackground}"
-                                BorderBrush="{StaticResource DockMenuBorder}"
+                                Background="{DynamicResource DockMenuBackground}"
+                                BorderBrush="{DynamicResource DockMenuBorder}"
                                 BorderThickness="1">
                             <Border.Effect>
                                 <DropShadowEffect BlurRadius="18" ShadowDepth="3" Direction="270"
@@ -39,7 +39,7 @@
         </Style>
 
         <Style TargetType="{x:Type MenuItem}">
-            <Setter Property="Foreground" Value="{StaticResource DockMenuForeground}" />
+            <Setter Property="Foreground" Value="{DynamicResource DockMenuForeground}" />
             <Setter Property="FontFamily" Value="Microsoft YaHei UI, Segoe UI" />
             <Setter Property="FontSize" Value="12.5" />
             <Setter Property="SnapsToDevicePixels" Value="True" />
@@ -62,7 +62,7 @@
                                            FontSize="11"
                                            Margin="0,0,0,0"
                                            Visibility="Collapsed"
-                                           Foreground="{StaticResource DockMenuForeground}"
+                                           Foreground="{DynamicResource DockMenuForeground}"
                                            VerticalAlignment="Center" />
                                 <ContentPresenter Grid.Column="1"
                                                   ContentSource="Header"
@@ -72,13 +72,13 @@
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsHighlighted" Value="True">
-                                <Setter TargetName="Bd" Property="Background" Value="{StaticResource DockMenuHighlight}" />
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource DockMenuHighlight}" />
                             </Trigger>
                             <Trigger Property="IsChecked" Value="True">
                                 <Setter TargetName="CheckMark" Property="Visibility" Value="Visible" />
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
-                                <Setter Property="Foreground" Value="{StaticResource DockMenuDisabled}" />
+                                <Setter Property="Foreground" Value="{DynamicResource DockMenuDisabled}" />
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -87,7 +87,7 @@
         </Style>
 
         <Style TargetType="{x:Type ToolTip}">
-            <Setter Property="Foreground" Value="{StaticResource DockMenuForeground}" />
+            <Setter Property="Foreground" Value="{DynamicResource DockMenuForeground}" />
             <Setter Property="FontFamily" Value="Microsoft YaHei UI, Segoe UI" />
             <Setter Property="FontSize" Value="12" />
             <Setter Property="HasDropShadow" Value="False" />
@@ -97,8 +97,8 @@
                         <Border Margin="8"
                                 Padding="11,8"
                                 CornerRadius="8"
-                                Background="{StaticResource DockMenuBackground}"
-                                BorderBrush="{StaticResource DockMenuBorder}"
+                                Background="{DynamicResource DockMenuBackground}"
+                                BorderBrush="{DynamicResource DockMenuBorder}"
                                 BorderThickness="1">
                             <Border.Effect>
                                 <DropShadowEffect BlurRadius="14" ShadowDepth="2" Direction="270"
@@ -115,7 +115,7 @@
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="{x:Type Separator}">
-                        <Border Height="1" Margin="6,5" Background="{StaticResource DockMenuSeparator}" />
+                        <Border Height="1" Margin="6,5" Background="{DynamicResource DockMenuSeparator}" />
                     </ControlTemplate>
                 </Setter.Value>
             </Setter>

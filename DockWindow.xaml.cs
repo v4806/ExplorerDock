@@ -8,6 +8,7 @@ using System.Windows.Interop;
 using System.Windows.Media;
 using ExplorerDock.Interop;
 using ExplorerDock.Models;
+using ExplorerDock.Services;
 
 namespace ExplorerDock;
 
@@ -23,6 +24,7 @@ public partial class DockWindow : Window
     private IntPtr _activeWindow;
     private PlacementMode _tooltipPlacement = PlacementMode.Bottom;
     private ShadowWindow? _shadow;
+    private ExplorerSnapshot? _lastSnapshot;
 
     private Brush _backgroundBrush = Brushes.Transparent;
     private Brush _borderBrush = Brushes.Transparent;
@@ -32,6 +34,8 @@ public partial class DockWindow : Window
     private Brush _activeBorderBrush = Brushes.Transparent;
     private Brush _chipBrush = Brushes.Transparent;
     private Brush _mutedBrush = Brushes.Gray;
+    private Brush _onActiveTextBrush = Brushes.White;
+    private Brush _onHoverTextBrush = Brushes.White;
 
     private static App Host => (App)Application.Current;
 
@@ -84,18 +88,21 @@ public partial class DockWindow : Window
 
     private void ApplyTheme()
     {
-        bool light = IsLightTheme();
+        bool light = App.Settings.ResolveLightTheme();
 
         if (light)
         {
-            _backgroundBrush = new SolidColorBrush(Color.FromArgb(0xF2, 0xF6, 0xF6, 0xF6));
-            _borderBrush = new SolidColorBrush(Color.FromArgb(0x30, 0x00, 0x00, 0x00));
+            // 浅色：白底 + 深色描边，活动项用深色块反白，对比明确
+            _backgroundBrush = new SolidColorBrush(Color.FromArgb(0xFA, 0xFA, 0xFA, 0xFA));
+            _borderBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0x24, 0x24, 0x24));
             _textBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0x1A, 0x1A, 0x1A));
-            _hoverBrush = new SolidColorBrush(Color.FromArgb(0x16, 0x00, 0x00, 0x00));
-            _activeBrush = new SolidColorBrush(Color.FromArgb(0x30, 0x00, 0x00, 0x00));
-            _activeBorderBrush = new SolidColorBrush(Color.FromArgb(0x3D, 0x00, 0x00, 0x00));
-            _chipBrush = new SolidColorBrush(Color.FromArgb(0x1F, 0x00, 0x00, 0x00));
-            _mutedBrush = new SolidColorBrush(Color.FromArgb(0x88, 0x00, 0x00, 0x00));
+            _hoverBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0x55, 0x55, 0x55));
+            _activeBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0x24, 0x24, 0x24));
+            _activeBorderBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0x24, 0x24, 0x24));
+            _onActiveTextBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));
+            _onHoverTextBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));
+            _chipBrush = new SolidColorBrush(Color.FromArgb(0x24, 0x00, 0x00, 0x00));
+            _mutedBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0x55, 0x55, 0x55));
         }
         else
         {
@@ -105,12 +112,41 @@ public partial class DockWindow : Window
             _hoverBrush = new SolidColorBrush(Color.FromArgb(0x1C, 0xFF, 0xFF, 0xFF));
             _activeBrush = new SolidColorBrush(Color.FromArgb(0x3D, 0xFF, 0xFF, 0xFF));
             _activeBorderBrush = new SolidColorBrush(Color.FromArgb(0x4D, 0xFF, 0xFF, 0xFF));
+            _onActiveTextBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));
+            _onHoverTextBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));
             _chipBrush = new SolidColorBrush(Color.FromArgb(0x3D, 0xFF, 0xFF, 0xFF));
             _mutedBrush = new SolidColorBrush(Color.FromArgb(0x8C, 0xFF, 0xFF, 0xFF));
         }
 
         RootBorder.Background = _backgroundBrush;
         RootBorder.BorderBrush = _borderBrush;
+
+        if (_grip is not null && _grip.Child is TextBlock dots) dots.Foreground = _mutedBrush;
+    }
+
+    /// <summary>主题切换后整体换色：按钮视觉持有刷子引用，所以直接重建一批。</summary>
+    public void ApplyThemeAndRebuild()
+    {
+        ApplyTheme();
+
+        foreach (var visual in _items.Values)
+        {
+            _itemsHost.Children.Remove(visual.Container);
+        }
+
+        _items.Clear();
+
+        if (_shadow is not null)
+        {
+            var borderColor = (_borderBrush as SolidColorBrush)?.Color ?? Color.FromArgb(0xFF, 0x24, 0x24, 0x24);
+            _shadow.SetTone(
+                Color.FromArgb(0xFF, borderColor.R, borderColor.G, borderColor.B),
+                RootBorder.CornerRadius.TopLeft,
+                App.Settings.ResolveLightTheme());
+            _shadow.SetInset(0);
+        }
+
+        if (_lastSnapshot is not null) ApplySnapshot(_lastSnapshot);
     }
 
     protected override void OnClosed(EventArgs e)
@@ -127,19 +163,7 @@ public partial class DockWindow : Window
         base.OnClosed(e);
     }
 
-    private static bool IsLightTheme()
-    {
-        try
-        {
-            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
-                @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
-            return key?.GetValue("SystemUsesLightTheme") is int v && v == 1;
-        }
-        catch
-        {
-            return false;
-        }
-    }
+    private static bool IsLightTheme_deprecated() => false;
 
     private Border CreateGrip()
     {
@@ -224,8 +248,12 @@ public partial class DockWindow : Window
         if (_shadow is null)
         {
             _shadow = new ShadowWindow();
-            var color = (_backgroundBrush as SolidColorBrush)?.Color ?? Color.FromArgb(0xFF, 0x1B, 0x1B, 0x1F);
-            _shadow.SetTone(Color.FromArgb(0xFF, color.R, color.G, color.B), RootBorder.CornerRadius.TopLeft);
+            var borderColor = (_borderBrush as SolidColorBrush)?.Color ?? Color.FromArgb(0xFF, 0x24, 0x24, 0x24);
+            _shadow.SetTone(
+                Color.FromArgb(0xFF, borderColor.R, borderColor.G, borderColor.B),
+                RootBorder.CornerRadius.TopLeft,
+                App.Settings.ResolveLightTheme());
+            _shadow.SetInset(0);
             _shadow.Show();
         }
 
@@ -343,6 +371,8 @@ public partial class DockWindow : Window
 
     public void ApplySnapshot(ExplorerSnapshot snapshot)
     {
+        _lastSnapshot = snapshot;
+
         // 悬浮栏自己成为前台时不算"活动窗口"，沿用上一次已知的前台窗口，
         // 免得点一下按钮高亮就闪没了
         if (snapshot.Foreground != EnsureOurHandle())
@@ -399,8 +429,8 @@ public partial class DockWindow : Window
     {
         var image = new Image
         {
-            Width = 16,
-            Height = 16,
+            Width = 18,
+            Height = 18,
             Stretch = Stretch.Uniform,
             VerticalAlignment = VerticalAlignment.Center,
         };
@@ -411,7 +441,7 @@ public partial class DockWindow : Window
             FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI"),
             FontSize = 12.5,
             Foreground = _textBrush,
-            Margin = new Thickness(7, 0, 0, 0),
+            Margin = new Thickness(9, 0, 0, 0),
             VerticalAlignment = VerticalAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis,
             MaxWidth = App.Settings.ShowFullTitle ? 340 : 145,
@@ -423,17 +453,17 @@ public partial class DockWindow : Window
 
         var container = new Border
         {
-            CornerRadius = new CornerRadius(8),
+            CornerRadius = new CornerRadius(7),
             Padding = new Thickness(9, 5, 9, 5),
             Margin = new Thickness(2, 0, 2, 0),
             Background = Brushes.Transparent,
-            BorderThickness = new Thickness(1),
+            BorderThickness = new Thickness(2),
             BorderBrush = Brushes.Transparent,
             Cursor = Cursors.Hand,
             Child = content,
         };
 
-        var visual = new ItemVisual(container, image, label, _hoverBrush, _activeBrush, _activeBorderBrush, BuildTooltipContent);
+        var visual = new ItemVisual(container, image, label, _hoverBrush, _activeBrush, _activeBorderBrush, _textBrush, _onActiveTextBrush, _onHoverTextBrush, BuildTooltipContent);
         visual.Update(info, false);
 
         ToolTipService.SetPlacement(container, _tooltipPlacement);
@@ -703,6 +733,30 @@ public partial class DockWindow : Window
             Host.RebuildDockItems();
         }));
         menu.Items.Add(new Separator());
+
+        // 主题三项必须互斥：WPF 的 IsCheckable 会自己翻转勾选，所以点完要统一刷新一遍
+        MenuItem? themeAuto = null;
+        MenuItem? themeDark = null;
+        MenuItem? themeLight = null;
+
+        themeAuto = CheckItem("主题：跟随系统", App.Settings.Theme == DockTheme.Auto, _ => SelectTheme(DockTheme.Auto));
+        themeDark = CheckItem("主题：深色", App.Settings.Theme == DockTheme.Dark, _ => SelectTheme(DockTheme.Dark));
+        themeLight = CheckItem("主题：浅色", App.Settings.Theme == DockTheme.Light, _ => SelectTheme(DockTheme.Light));
+
+        menu.Items.Add(themeAuto);
+        menu.Items.Add(themeDark);
+        menu.Items.Add(themeLight);
+
+        void SelectTheme(DockTheme theme)
+        {
+            Host.SetTheme(theme);
+
+            if (themeAuto is not null) themeAuto.IsChecked = App.Settings.Theme == DockTheme.Auto;
+            if (themeDark is not null) themeDark.IsChecked = App.Settings.Theme == DockTheme.Dark;
+            if (themeLight is not null) themeLight.IsChecked = App.Settings.Theme == DockTheme.Light;
+        }
+
+        menu.Items.Add(new Separator());
         menu.Items.Add(CheckItem("开机自动启动", App.Settings.RunAtStartup, Host.SetRunAtStartup));
         menu.Items.Add(MenuAction("回到屏幕顶部居中", ResetPosition));
         menu.Items.Add(MenuAction("隐藏悬浮栏", () => Host.SetShowDock(false)));
@@ -742,6 +796,9 @@ public partial class DockWindow : Window
         private readonly Brush _hover;
         private readonly Brush _active;
         private readonly Brush _activeBorder;
+        private readonly Brush _text;
+        private readonly Brush _onActiveText;
+        private readonly Brush _onHoverText;
         private readonly Func<ExplorerWindowInfo, object> _tooltipFactory;
         private bool _hovering;
         private bool _isActive;
@@ -754,6 +811,9 @@ public partial class DockWindow : Window
             Brush hover,
             Brush active,
             Brush activeBorder,
+            Brush text,
+            Brush onActiveText,
+            Brush onHoverText,
             Func<ExplorerWindowInfo, object> tooltipFactory)
         {
             Container = container;
@@ -762,6 +822,9 @@ public partial class DockWindow : Window
             _hover = hover;
             _active = active;
             _activeBorder = activeBorder;
+            _text = text;
+            _onActiveText = onActiveText;
+            _onHoverText = onHoverText;
             _tooltipFactory = tooltipFactory;
         }
 
@@ -805,15 +868,27 @@ public partial class DockWindow : Window
 
         private void Refresh()
         {
+            // 高亮块只改背景：背景与描边同色时圆角会画两遍，边缘会显得残缺
             if (_isActive)
             {
                 Container.Background = _active;
-                Container.BorderBrush = _activeBorder;
+                Container.BorderBrush = Brushes.Transparent;
+                Label.Foreground = _onActiveText;
                 return;
             }
 
-            Container.Background = _hovering ? _hover : Brushes.Transparent;
+            if (_hovering)
+            {
+                Container.Background = _hover;
+                Container.BorderBrush = Brushes.Transparent;
+                Label.Foreground = _onHoverText;
+                return;
+            }
+
+            Container.Background = Brushes.Transparent;
             Container.BorderBrush = Brushes.Transparent;
+            Label.Foreground = _text;
         }
     }
 }
+

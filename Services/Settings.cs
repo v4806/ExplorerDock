@@ -4,8 +4,19 @@ using System.Text.Json.Serialization;
 
 namespace ExplorerDock.Services;
 
+/// <summary>悬浮栏配色：跟随系统 / 强制深色 / 强制浅色。</summary>
+public enum DockTheme
+{
+    Auto = 0,
+    Dark = 1,
+    Light = 2,
+}
+
 public sealed class Settings
 {
+    /// <summary>悬浮栏与菜单的配色方案。</summary>
+    public DockTheme Theme { get; set; } = DockTheme.Auto;
+
     /// <summary>是否把资源管理器窗口从任务栏摘除（核心功能）。</summary>
     public bool TakeoverEnabled { get; set; } = true;
 
@@ -34,6 +45,24 @@ public sealed class Settings
         Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
         "ExplorerDock",
         "settings.json");
+
+    /// <summary>按当前主题设置（必要时读系统设置）判断是否用浅色。</summary>
+    public bool ResolveLightTheme()
+    {
+        if (Theme == DockTheme.Light) return true;
+        if (Theme == DockTheme.Dark) return false;
+
+        try
+        {
+            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
+            return key?.GetValue("SystemUsesLightTheme") is int value && value == 1;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
     public static Settings Load()
     {

@@ -13,7 +13,31 @@ internal static class ShellInterop
     private const uint SHGFI_LARGEICON = 0x000000000;
     private const uint SHGFI_SMALLICON = 0x000000001;
     private const uint SHGFI_USEFILEATTRIBUTES = 0x000000010;
+    private const uint SHGFI_SYSICONINDEX = 0x00004000;
     private const uint FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
+    private const int SHIL_JUMBO = 0x4;
+    private const int SHIL_EXTRALARGE = 0x2;
+    private const int ILD_TRANSPARENT = 0x1;
+
+    private static readonly Guid IIDIImageList = new("46EB5926-582E-4017-9FDF-E8998DAA0950");
+
+    [ComImport]
+    [Guid("46EB5926-582E-4017-9FDF-E8998DAA0950")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IImageList
+    {
+        int Add(IntPtr hbmImage, IntPtr hbmMask, ref int pi);
+        int ReplaceIcon(int i, IntPtr hicon, ref int pi);
+        int SetOverlayImage(int iImage, int iOverlay);
+        int Replace(int i, IntPtr hbmImage, IntPtr hbmMask);
+        int AddMasked(IntPtr hbmImage, int crMask, ref int pi);
+        int Draw(IntPtr pimldp);
+        int Remove(int i);
+        int GetIcon(int i, int flags, out IntPtr picon);
+    }
+
+    [DllImport("shell32.dll")]
+    private static extern int SHGetImageList(int iImageList, ref Guid riid, out IImageList ppv);
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct SHFILEINFO
@@ -97,6 +121,31 @@ internal static class ShellInterop
 
     private static ImageSource? BuildIcon(string? path)
     {
+        // 首选 shell 的 jumbo(256px) 图像列表：按显示尺寸缩下去最清晰，高 DPI 下也不糊
+        try
+        {
+            bool real = !string.IsNullOrWhiteSpace(path) && Directory.Exists(path);
+            var info = new SHFILEINFO();
+            var flags = SHGFI_SYSICONINDEX | (real ? 0u : SHGFI_USEFILEATTRIBUTES);
+            SHGetFileInfo(real ? path! : "folder", FILE_ATTRIBUTE_DIRECTORY, ref info,
+                (uint)Marshal.SizeOf<SHFILEINFO>(), flags);
+
+            var iid = IIDIImageList;
+            if (SHGetImageList(SHIL_JUMBO, ref iid, out var list) == 0 && list is not null)
+            {
+                if (list.GetIcon(info.iIcon, ILD_TRANSPARENT, out var hIcon) == 0 && hIcon != IntPtr.Zero)
+                {
+                    var source = FromHIcon(hIcon);
+                    DestroyIcon(hIcon);
+                    if (source is not null) return source;
+                }
+            }
+        }
+        catch
+        {
+            // 落到下面的兜底路径
+        }
+
         try
         {
             if (!string.IsNullOrWhiteSpace(path) && Directory.Exists(path))
