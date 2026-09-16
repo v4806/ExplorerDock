@@ -404,7 +404,8 @@ public partial class DockWindow : Window
             Activate(target);
         };
 
-        _altTabProxy.Show();
+        // 注意：这里不 Show()。要等 AttachTo 把标题设成文件夹名之后再显示，
+        // 否则 ALT+TAB 会一直用首次登记时的默认标题。
     }
 
     /// <summary>
@@ -544,6 +545,28 @@ public partial class DockWindow : Window
         {
             var info = snapshot.Windows.FirstOrDefault(w => w.Handle == _lastActiveFolder);
             _altTabProxy.AttachTo(_lastActiveFolder, info?.Title ?? "文件夹");
+
+            // 关键：先把标题设成文件夹名，再让窗口第一次出现 ——
+            // ALT+TAB 只在窗口首次登记时读一次标题，之后再改它不会刷新
+            if (!_altTabProxy.IsVisible)
+            {
+                _altTabProxy.Show();
+
+                // 对"尚未显示"的窗口注册 DWM 缩略图是不生效的（ALT+TAB 会是黑块），
+                // 所以显示之后重新注册一次
+                var proxy = _altTabProxy;
+                var target = _lastActiveFolder;
+                var title = info?.Title ?? "文件夹";
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    proxy.Detach();
+                    proxy.AttachTo(target, title);
+                }), DispatcherPriority.Background);
+            }
+            else
+            {
+                _altTabProxy.UpdateThumbnail();
+            }
         }
 
         var seen = new HashSet<IntPtr>();
