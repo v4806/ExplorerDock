@@ -6,6 +6,7 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Threading;
 using ExplorerDock.Interop;
 using ExplorerDock.Models;
 using ExplorerDock.Services;
@@ -25,6 +26,7 @@ public partial class DockWindow : Window
     private PlacementMode _tooltipPlacement = PlacementMode.Bottom;
     private ShadowWindow? _shadow;
     private ExplorerSnapshot? _lastSnapshot;
+    private readonly DispatcherTimer _topmostTimer;
 
     private Brush _backgroundBrush = Brushes.Transparent;
     private Brush _borderBrush = Brushes.Transparent;
@@ -77,6 +79,15 @@ public partial class DockWindow : Window
 
         Loaded += OnLoaded;
         LocationChanged += (_, _) => UpdateShadowBounds();
+
+        // 拖动别的窗口时 Windows 会临时把被拖窗口提到最前，我们的置顶可能被挤掉；
+        // 定时重新钉一遍，被遮住也能自己回来
+        _topmostTimer = new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromMilliseconds(800),
+        };
+        _topmostTimer.Tick += (_, _) => EnsureTopmost();
+
         MouseRightButtonUp += (_, e) =>
         {
             ShowMenu();
@@ -240,6 +251,7 @@ public partial class DockWindow : Window
         }
 
         EnsureShadow();
+        _topmostTimer.Start();
     }
 
     /// <summary>阴影由独立窗口绘制：它鼠标穿透，所以阴影区不会吃掉点击。</summary>
@@ -289,6 +301,44 @@ public partial class DockWindow : Window
                 0, 0, 0, 0,
                 NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
         }
+    }
+
+    /// <summary>
+    /// 把悬浮栏重新钉回最上层，并保持阴影层压在它下面。
+    /// 拖动其它窗口时 Windows 会把被拖窗口临时提到最前，被挤掉的置顶靠这个找回来。
+    /// </summary>
+    private void EnsureTopmost()
+    {
+        if (!IsVisible) return;
+
+        var dockHandle = EnsureOurHandle();
+        if (dockHandle == IntPtr.Zero) return;
+
+        long style = NativeMethods.GetWindowLongPtr(dockHandle, NativeMethods.GWL_EXSTYLE);
+        bool wasTopmost = (style & NativeMethods.WS_EX_TOPMOST) != 0;
+
+        bool ok = NativeMethods.SetWindowPos(
+            dockHandle,
+            NativeMethods.HWND_TOPMOST,
+            0, 0, 0, 0,
+            NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
+
+        if (!wasTopmost)
+        {
+            long now = NativeMethods.GetWindowLongPtr(dockHandle, NativeMethods.GWL_EXSTYLE);
+            Diag($"topmost repair: ok={ok} before={wasTopmost} after={(now & NativeMethods.WS_EX_TOPMOST) != 0}");
+        }
+
+        if (_shadow is null) return;
+
+        var shadowHandle = new WindowInteropHelper(_shadow).Handle;
+        if (shadowHandle == IntPtr.Zero) return;
+
+        NativeMethods.SetWindowPos(
+            shadowHandle,
+            dockHandle,
+            0, 0, 0, 0,
+            NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
     }
 
     protected override void OnRenderSizeChanged(SizeChangedInfo info)
