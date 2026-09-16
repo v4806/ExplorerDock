@@ -43,7 +43,10 @@ public sealed class ExplorerWatcher : IDisposable
 
     public bool TakeoverEnabled { get; set; } = true;
 
-    public void Start() => _thread.Start();
+    public void Start()
+    {
+        _thread.Start();
+    }
 
     private void Loop()
     {

@@ -103,34 +103,6 @@ public partial class DockWindow : Window
         };
     }
 
-    /// <summary>
-    /// ALT+TAB 里的那一项就是悬浮栏自己（顺序由系统按使用历史维护）。
-    /// 从 ALT+TAB 切过来时，立刻把焦点交给最后在用的那个文件夹窗口 ——
-    /// 相当于"切到这一项 = 切回最近用的文件夹"。
-    /// 鼠标直接点进来（准备点某个按钮）则不跳转。
-    /// </summary>
-    protected override void OnActivated(EventArgs e)
-    {
-        base.OnActivated(e);
-
-        Dispatcher.BeginInvoke(new Action(() =>
-        {
-            // 鼠标按着左键进来 = 用户要点悬浮栏上的按钮，留在悬浮栏
-            if (Mouse.LeftButton == MouseButtonState.Pressed)
-            {
-                Diag("activated by mouse click, stay");
-                return;
-            }
-
-            var target = _lastActiveFolder;
-            Diag($"activated (alt-tab?): target=0x{target.ToInt64():X} valid={NativeMethods.IsWindow(target)}");
-
-            if (target == IntPtr.Zero || !NativeMethods.IsWindow(target)) return;
-
-            Activate(target);
-        }), DispatcherPriority.Background);
-    }
-
     // ---------- 外观 ----------
 
     private void ApplyTheme()
