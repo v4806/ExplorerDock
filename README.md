@@ -11,6 +11,7 @@
 
 ![悬浮栏](docs/dock.png)
 
+视频说明：https://www.bilibili.com/video/BV1UGew6rEWA/?vd_source=59a41726dfea3b6a13052616aa771cab
 ## 特性
 
 - **任务栏减负**：所有文件夹窗口的按钮从任务栏移除，ALT+TAB 不受影响（窗口仍在切换列表里）。
