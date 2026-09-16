@@ -15,8 +15,8 @@
     <!-- 不要给窗口留透明外边距、也不要投影：那会让鼠标命中区域比看得见的 UI 大一圈，
          点悬浮栏旁边的空白会被吃掉。窗口尺寸 == 可见范围。 -->
     <Border x:Name="RootBorder"
-            CornerRadius="12"
-            BorderThickness="1"
+            CornerRadius="9"
+            BorderThickness="1.5"
             Padding="4,3">
         <StackPanel x:Name="RootPanel" Orientation="Horizontal" VerticalAlignment="Center" />
     </Border>

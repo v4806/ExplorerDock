@@ -22,6 +22,7 @@ public partial class DockWindow : Window
     private IntPtr _ourHandle;
     private IntPtr _activeWindow;
     private PlacementMode _tooltipPlacement = PlacementMode.Bottom;
+    private ShadowWindow? _shadow;
 
     private Brush _backgroundBrush = Brushes.Transparent;
     private Brush _borderBrush = Brushes.Transparent;
@@ -71,6 +72,7 @@ public partial class DockWindow : Window
         };
 
         Loaded += OnLoaded;
+        LocationChanged += (_, _) => UpdateShadowBounds();
         MouseRightButtonUp += (_, e) =>
         {
             ShowMenu();
@@ -109,6 +111,20 @@ public partial class DockWindow : Window
 
         RootBorder.Background = _backgroundBrush;
         RootBorder.BorderBrush = _borderBrush;
+    }
+
+    protected override void OnClosed(EventArgs e)
+    {
+        try
+        {
+            _shadow?.Close();
+        }
+        catch
+        {
+            // 忽略
+        }
+
+        base.OnClosed(e);
     }
 
     private static bool IsLightTheme()
@@ -198,6 +214,53 @@ public partial class DockWindow : Window
             _autoCenter = true;
             MoveToDefaultPosition();
         }
+
+        EnsureShadow();
+    }
+
+    /// <summary>阴影由独立窗口绘制：它鼠标穿透，所以阴影区不会吃掉点击。</summary>
+    private void EnsureShadow()
+    {
+        if (_shadow is null)
+        {
+            _shadow = new ShadowWindow();
+            var color = (_backgroundBrush as SolidColorBrush)?.Color ?? Color.FromArgb(0xFF, 0x1B, 0x1B, 0x1F);
+            _shadow.SetTone(Color.FromArgb(0xFF, color.R, color.G, color.B), RootBorder.CornerRadius.TopLeft);
+            _shadow.Show();
+        }
+
+        UpdateShadowBounds();
+    }
+
+    private void UpdateShadowBounds()
+    {
+        if (_shadow is null) return;
+
+        if (!IsVisible || ActualWidth <= 0 || ActualHeight <= 0)
+        {
+            if (_shadow.IsVisible) _shadow.Hide();
+            return;
+        }
+
+        if (!_shadow.IsVisible) _shadow.Show();
+
+        _shadow.Left = Left - ShadowWindow.ShadowMargin;
+        _shadow.Top = Top - ShadowWindow.ShadowMargin;
+        _shadow.Width = ActualWidth + (ShadowWindow.ShadowMargin * 2);
+        _shadow.Height = ActualHeight + (ShadowWindow.ShadowMargin * 2);
+
+        // 始终把阴影窗口压在悬浮栏下面，免得盖住它
+        var dockHandle = EnsureOurHandle();
+        var shadowHandle = new WindowInteropHelper(_shadow).Handle;
+
+        if (dockHandle != IntPtr.Zero && shadowHandle != IntPtr.Zero)
+        {
+            NativeMethods.SetWindowPos(
+                shadowHandle,
+                dockHandle,
+                0, 0, 0, 0,
+                NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
+        }
     }
 
     protected override void OnRenderSizeChanged(SizeChangedInfo info)
@@ -206,6 +269,8 @@ public partial class DockWindow : Window
 
         // 用户没手动挪过位置时，宽度变化后保持在底部居中
         if (_autoCenter) MoveToDefaultPosition();
+
+        UpdateShadowBounds();
     }
 
     private static bool IsOnScreen(double left, double top)
@@ -321,10 +386,12 @@ public partial class DockWindow : Window
         if (shouldShow)
         {
             if (!IsVisible) Show();
+            EnsureShadow();
         }
         else if (IsVisible)
         {
             Hide();
+            _shadow?.Hide();
         }
     }
 
