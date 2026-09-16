@@ -26,6 +26,7 @@ public sealed class ExplorerWatcher : IDisposable
     private readonly TaskbarTweaker _taskbar = new();
     private readonly List<ExplorerWindowInfo> _order = new();
     private volatile bool _running = true;
+    private IntPtr _lastForeground;
     private int _tick;
 
     public ExplorerWatcher()
@@ -97,6 +98,14 @@ public sealed class ExplorerWatcher : IDisposable
                 }
 
                 var foreground = NativeMethods.GetForegroundWindow();
+
+                // 前台窗口变了也算变化：悬浮栏要靠它更新"最后在用的文件夹窗口"
+                // （ALT+TAB 里的替身显示哪个文件夹、切到哪去，都取决于这个）
+                if (foreground != _lastForeground)
+                {
+                    _lastForeground = foreground;
+                    changed = true;
+                }
 
                 if (changed)
                 {

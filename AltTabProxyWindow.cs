@@ -136,6 +136,40 @@ internal sealed class AltTabProxyWindow : Window
         DwmUpdateThumbnailProperties(_thumbnail, ref props);
     }
 
+    /// <summary>
+    /// 把替身提到 Z 序最前。ALT+TAB 的顺序就是 Z 序，
+    /// 而替身自己从不被激活，不主动提一下就会永远排在列表末尾。
+    /// </summary>
+    public void BringToFront()
+    {
+        var handle = new WindowInteropHelper(this).Handle;
+        if (handle == IntPtr.Zero) return;
+
+        NativeMethods.SetWindowPos(
+            handle, IntPtr.Zero, 0, 0, 0, 0,
+            NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
+    }
+
+    /// <summary>
+    /// 让替身进入 ALT+TAB 的"最近使用"位置。
+    ///
+    /// ALT+TAB 的顺序由窗口的**激活历史**决定（不是 Z 序），而替身从不被真正使用，
+    /// 所以一直垫底。这里先把它激活、再在同一帧里把焦点交还目标文件夹窗口，
+    /// 用户基本看不到中间态。
+    /// </summary>
+    public void Touch()
+    {
+        var handle = new WindowInteropHelper(this).Handle;
+        var folder = _sourceHandle;
+        if (handle == IntPtr.Zero || folder == IntPtr.Zero) return;
+        if (!NativeMethods.IsWindow(folder)) return;
+
+        // 用和切换文件夹同样的"抢前台"手段激活替身，
+        // 让 shell 把它记进 ALT+TAB 的最近使用序列，然后立刻把焦点交还文件夹窗口
+        NativeMethods.ForceForeground(handle);
+        NativeMethods.ForceForeground(folder);
+    }
+
     public void Detach()
     {
         if (_registered && _thumbnail != IntPtr.Zero)

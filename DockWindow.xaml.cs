@@ -567,6 +567,10 @@ public partial class DockWindow : Window
             {
                 _altTabProxy.UpdateThumbnail();
             }
+
+            // ALT+TAB 的顺序就是 Z 序：每次换文件夹就把替身提到最前，
+            // 让它在列表里待在"最近使用"的位置，而不是一直垫底
+            _altTabProxy.BringToFront();
         }
 
         var seen = new HashSet<IntPtr>();
@@ -796,7 +800,13 @@ public partial class DockWindow : Window
         var ok = NativeMethods.ForceForeground(hwnd);
         Diag($"activate: target=0x{hwnd.ToInt64():X} ok={ok} fg=0x{NativeMethods.GetForegroundWindow().ToInt64():X}");
 
-        if (ok) SetActiveWindow(hwnd);
+        if (ok)
+        {
+            SetActiveWindow(hwnd);
+
+            // 让 ALT+TAB 里的替身排到"最近使用"的位置
+            _altTabProxy?.Touch();
+        }
     }
 
     /// <summary>立刻刷新高亮，不必等下一轮轮询。</summary>
