@@ -202,10 +202,34 @@ internal static class NativeMethods
 
     public static string GetWindowTextSafe(IntPtr hWnd)
     {
+        // 必须用 WM_GETTEXT 跨进程去问窗口要标题。
+        // GetWindowText 对属于**其他进程**的窗口不会真的去问，只返回本进程缓存的副本 ——
+        // 结果就是资源管理器窗口的标题变了（比如关掉多余标签页），我们却一直读到旧值。
         var sb = new StringBuilder(512);
-        GetWindowText(hWnd, sb, sb.Capacity);
-        return sb.ToString();
+        var ok = SendMessageTimeout(
+            hWnd,
+            WM_GETTEXT,
+            new IntPtr(sb.Capacity),
+            sb,
+            SMTO_ABORTIFHUNG,
+            300,
+            out _);
+
+        return ok != IntPtr.Zero ? sb.ToString() : string.Empty;
     }
+
+    public const uint WM_GETTEXT = 0x000D;
+    public const uint SMTO_ABORTIFHUNG = 0x0002;
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr SendMessageTimeout(
+        IntPtr hWnd,
+        uint msg,
+        IntPtr wParam,
+        StringBuilder lParam,
+        uint flags,
+        uint timeout,
+        out IntPtr result);
 
     public static string GetClassNameSafe(IntPtr hWnd)
     {

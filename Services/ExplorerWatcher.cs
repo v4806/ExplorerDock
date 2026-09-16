@@ -205,6 +205,8 @@ public sealed class ExplorerWatcher : IDisposable
             }
         }
 
+        // 多标签页时标题形如「当前标签页名 和 1 个其他选项卡」，原样保留：
+        // 该后缀正好提示"这个窗口里还有别的标签页"，是有用信息，不去掉。
         return raw.Trim();
     }
 
