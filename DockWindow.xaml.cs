@@ -19,6 +19,8 @@ public partial class DockWindow : Window
     private readonly StackPanel _itemsHost;
     private readonly ScrollViewer _scroller;
     private readonly Border _grip;
+    private Border? _scrollLeft;
+    private Border? _scrollRight;
     private readonly Dictionary<IntPtr, ItemVisual> _items = new();
     private bool _autoCenter;
     private IntPtr _ourHandle;
@@ -90,12 +92,26 @@ public partial class DockWindow : Window
 
         _grip = CreateGrip();
 
+        // 窗口宽度有上限，窗口多了就会被裁在右边。滚动条是隐藏的（外观干净），
+        // 这里补一对左右箭头当可见的滚动入口，内容没溢出时它们自己收起来。
+        _scrollLeft = CreateScrollButton("\u2039", -1);
+        _scrollRight = CreateScrollButton("\u203A", 1);
+
         RootPanel.Children.Add(_grip);
+        RootPanel.Children.Add(_scrollLeft);
         RootPanel.Children.Add(_scroller);
+        RootPanel.Children.Add(_scrollRight);
+
+        UpdateScrollerMaxWidth();
+
+        _scroller.ScrollChanged += (_, _) => UpdateScrollButtons();
+        _itemsHost.SizeChanged += (_, _) => QueueScrollButtonUpdate();
 
         PreviewMouseWheel += (_, e) =>
         {
-            _scroller.ScrollToHorizontalOffset(_scroller.HorizontalOffset - (e.Delta * 0.6));
+            // 一格滚轮 = 3 个按钮的宽度。直接拿 e.Delta 当像素量的话一次只挪几十像素，
+            // 窗口一多就感觉"滚不动"。
+            ScrollBy(-Math.Sign(e.Delta) * StepWidth() * 3);
             e.Handled = true;
         };
 
@@ -247,6 +263,10 @@ public partial class DockWindow : Window
         RootBorder.BorderBrush = _borderBrush;
 
         if (_grip is not null && _grip.Child is TextBlock dots) dots.Foreground = _mutedBrush;
+        if (_scrollLeft?.Child is TextBlock leftArrow) leftArrow.Foreground = _mutedBrush;
+        if (_scrollRight?.Child is TextBlock rightArrow) rightArrow.Foreground = _mutedBrush;
+
+        UpdateScrollerMaxWidth();
     }
 
     /// <summary>把 #AARRGGBB 之类的字符串解析成刷子，解析失败就用兜底色。</summary>
@@ -307,6 +327,103 @@ public partial class DockWindow : Window
     }
 
     private static bool IsLightTheme_deprecated() => false;
+
+    /// <summary>
+    /// 给滚动区一个明确的最大宽度 —— 这是"窗口一多就滚不动"的正解。
+    /// 只靠 Window.MaxWidth 不行：SizeToContent 会把无限约束一路传下来，
+    /// ScrollViewer 以为自己有无限空间，ScrollableWidth 恒为 0，
+    /// 于是多出来的按钮被窗口直接裁掉、滚轮怎么滚都没反应。
+    /// 这里把可用宽度换算成 RootPanel 内部坐标（要除以 LayoutTransform 的倍率），
+    /// 再扣掉把手和两个箭头，剩下的才是滚动区该有的上限。
+    /// </summary>
+    private void UpdateScrollerMaxWidth()
+    {
+        if (_scroller is null) return;
+
+        double chrome = RootBorder.BorderThickness.Left + RootBorder.BorderThickness.Right
+                      + RootBorder.Padding.Left + RootBorder.Padding.Right;
+
+        double room = (MaxWidth - chrome) / Math.Max(1.0, _scale);
+        room -= _grip?.Width ?? 0;
+        room -= (_scrollLeft?.Width ?? 0) + (_scrollRight?.Width ?? 0);
+
+        _scroller.MaxWidth = Math.Max(120, room);
+    }
+
+    /// <summary>溢出时才出现的左右滚动箭头，配色跟着主题走。</summary>
+    private Border CreateScrollButton(string glyph, int direction)
+    {
+        var text = new TextBlock
+        {
+            Text = glyph,
+            FontFamily = new FontFamily("Segoe UI Symbol"),
+            FontSize = 14,
+            Foreground = _mutedBrush,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+
+        var border = new Border
+        {
+            Width = 16,
+            CornerRadius = new CornerRadius(7),
+            Background = Brushes.Transparent,
+            Cursor = Cursors.Hand,
+            Child = text,
+            VerticalAlignment = VerticalAlignment.Center,
+            Visibility = Visibility.Collapsed,
+            ToolTip = direction < 0 ? "往前翻" : "往后翻",
+        };
+
+        border.MouseEnter += (_, _) => text.Foreground = _textBrush;
+        border.MouseLeave += (_, _) => text.Foreground = _mutedBrush;
+        border.MouseLeftButtonUp += (_, e) =>
+        {
+            ScrollBy(direction * StepWidth() * 3);
+            e.Handled = true;
+        };
+
+        return border;
+    }
+
+    private void UpdateScrollButtons()
+    {
+        if (_scrollLeft is null || _scrollRight is null) return;
+
+        double max = _scroller.ScrollableWidth;
+        double offset = _scroller.HorizontalOffset;
+
+        // ScrollableWidth 偶尔比实际布局慢一拍，再用内容宽度兜一次底
+        if (max <= 1 && _itemsHost.ActualWidth > _scroller.ActualWidth + 1)
+        {
+            max = _itemsHost.ActualWidth - _scroller.ActualWidth;
+        }
+
+        bool scrollable = max > 1;
+
+        _scrollLeft.Visibility = scrollable && offset > 0.5 ? Visibility.Visible : Visibility.Collapsed;
+        _scrollRight.Visibility = scrollable && offset < max - 0.5 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void ScrollBy(double delta)
+    {
+        double max = Math.Max(0, _scroller.ScrollableWidth);
+        _scroller.ScrollToHorizontalOffset(Math.Clamp(_scroller.HorizontalOffset + delta, 0, max));
+        UpdateScrollButtons();
+    }
+
+    /// <summary>一个按钮连左右间距占多宽 —— 滚动步长按它的整数倍走，不会停在半个按钮上。</summary>
+    private double StepWidth()
+    {
+        if (_itemsHost.Children.Count > 0 &&
+            _itemsHost.Children[0] is FrameworkElement first &&
+            first.ActualWidth > 1)
+        {
+            return first.ActualWidth + first.Margin.Left + first.Margin.Right;
+        }
+
+        return 120;
+    }
 
     private Border CreateGrip()
     {
@@ -390,6 +507,18 @@ public partial class DockWindow : Window
         EnsureShadow();
         _lastSystemLight = Settings.IsSystemLightTheme();
         _topmostTimer.Start();
+
+        // 布局完成之前 ScrollableWidth 还是 0，箭头显隐要等这一轮布局走完再算
+        QueueScrollButtonUpdate();
+    }
+
+    /// <summary>
+    /// 箭头显隐取决于 ScrollableWidth，而这个值是在布局过程中才算出来的，
+    /// 所以统一延后到后台优先级再读，免得拿到上一轮的旧值。
+    /// </summary>
+    private void QueueScrollButtonUpdate()
+    {
+        Dispatcher.BeginInvoke(new Action(UpdateScrollButtons), DispatcherPriority.Background);
     }
 
     /// <summary>阴影由独立窗口绘制：它鼠标穿透，所以阴影区不会吃掉点击。</summary>
@@ -632,6 +761,8 @@ public partial class DockWindow : Window
         }
 
         var seen = new HashSet<IntPtr>();
+        bool added = false;
+        bool wasAtRight = _scroller.ScrollableWidth - _scroller.HorizontalOffset < 24;
 
         foreach (var info in snapshot.Windows)
         {
@@ -642,6 +773,7 @@ public partial class DockWindow : Window
                 visual = CreateItemVisual(info);
                 _items[info.Handle] = visual;
                 _itemsHost.Children.Add(visual.Container);
+                added = true;
             }
 
             visual.Update(info, _activeWindow == info.Handle);
@@ -653,6 +785,20 @@ public partial class DockWindow : Window
             if (seen.Contains(handle)) continue;
             _itemsHost.Children.Remove(_items[handle].Container);
             _items.Remove(handle);
+        }
+
+        // 新窗口排在右边：用户本来就停在最右端的话，继续跟着最右端走
+        if (added && wasAtRight)
+        {
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                _scroller.ScrollToHorizontalOffset(_scroller.ScrollableWidth);
+                UpdateScrollButtons();
+            }), DispatcherPriority.Background);
+        }
+        else
+        {
+            QueueScrollButtonUpdate();
         }
 
         RefreshVisibility();

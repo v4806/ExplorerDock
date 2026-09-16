@@ -11,7 +11,7 @@
     <AssemblyName>ExplorerDock</AssemblyName>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>app.ico</ApplicationIcon>
-    <Version>1.0.2</Version>
+    <Version>1.0.3</Version>
     <Product>ExplorerDock</Product>
     <AssemblyTitle>ExplorerDock</AssemblyTitle>
     <Description>把文件资源管理器窗口从任务栏解放到悬浮栏</Description>
