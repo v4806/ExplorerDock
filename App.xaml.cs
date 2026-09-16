@@ -74,6 +74,10 @@ public partial class App : Application
         Dock = new DockWindow();
         if (Settings.ShowDock) Dock.Show();
 
+        // 启动时还没有任何快照，先按"当前有没有文件夹窗口"判定一次显隐，
+        // 否则开机自启会留下一条空白的悬浮栏
+        Dock.RefreshVisibility();
+
         _watcher = new ExplorerWatcher
         {
             TakeoverEnabled = Settings.TakeoverEnabled,
@@ -178,7 +182,7 @@ public partial class App : Application
         _taskbar?.Restore(hwnd);
     }
 
-    /// <summary>应急：把所有文件夹窗口的按钮还给任务栏。</summary>
+    /// <summary>应急：把所有文件夹窗口的按钮还给任务栏（清掉统一分组 + 还原可能被摘除的按钮）。</summary>
     public static void RestoreEverythingToTaskbar()
     {
         using var taskbar = new TaskbarTweaker();
@@ -187,6 +191,7 @@ public partial class App : Application
         {
             try
             {
+                AppUserModelId.TrySet(hwnd, null);
                 taskbar.Restore(hwnd);
             }
             catch

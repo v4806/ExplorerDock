@@ -28,6 +28,9 @@ public partial class DockWindow : Window
     private ExplorerSnapshot? _lastSnapshot;
     private readonly DispatcherTimer _topmostTimer;
     private DateTime _lastTopmostFix = DateTime.MinValue;
+    private bool _dragging;
+    private IntPtr _lastActiveFolder;
+    private AltTabProxyWindow? _altTabProxy;
 
     private Brush _backgroundBrush = Brushes.Transparent;
     private Brush _borderBrush = Brushes.Transparent;
@@ -79,7 +82,12 @@ public partial class DockWindow : Window
         };
 
         Loaded += OnLoaded;
-        LocationChanged += (_, _) => UpdateShadowBounds();
+        LocationChanged += (_, _) =>
+        {
+            // 拖动过程中就把窗口限制在屏幕内，免得被拖出屏幕或贴死在边缘
+            if (_dragging) ClampToScreen();
+            UpdateShadowBounds();
+        };
 
         // 拖动别的窗口时 Windows 会临时把被拖窗口提到最前，我们的置顶可能被挤掉；
         // 定时重新钉一遍，被遮住也能自己回来
@@ -94,6 +102,25 @@ public partial class DockWindow : Window
             ShowMenu();
             e.Handled = true;
         };
+    }
+
+    /// <summary>
+    /// 悬浮栏自己从 ALT+TAB 里退出去（加 WS_EX_TOOLWINDOW），
+    /// 改由 <see cref="AltTabProxyWindow"/> 当替身：它显示最后在用的文件夹窗口的实时画面，
+    /// 选中它就跳回那个文件夹窗口。
+    /// </summary>
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+
+        var handle = new WindowInteropHelper(this).Handle;
+        if (handle == IntPtr.Zero) return;
+
+        long style = NativeMethods.GetWindowLongPtr(handle, NativeMethods.GWL_EXSTYLE);
+        NativeMethods.SetWindowLongPtr(
+            handle,
+            NativeMethods.GWL_EXSTYLE,
+            (style | NativeMethods.WS_EX_TOOLWINDOW) & ~NativeMethods.WS_EX_APPWINDOW);
     }
 
     // ---------- 外观 ----------
@@ -209,6 +236,8 @@ public partial class DockWindow : Window
                 return;
             }
 
+            _dragging = true;
+
             try
             {
                 DragMove();
@@ -218,7 +247,10 @@ public partial class DockWindow : Window
                 // 拖动被打断，忽略
             }
 
+            _dragging = false;
+
             _autoCenter = false;
+            ClampToScreen();
             SavePosition();
         };
 
@@ -359,6 +391,50 @@ public partial class DockWindow : Window
         return new WindowInteropHelper(_shadow).Handle;
     }
 
+    /// <summary>ALT+TAB 替身：显示最后在用文件夹窗口的画面，选中即跳回它。</summary>
+    private void EnsureAltTabProxy()
+    {
+        if (_altTabProxy is not null) return;
+
+        _altTabProxy = new AltTabProxyWindow();
+        _altTabProxy.Activated += (_, _) =>
+        {
+            var target = _altTabProxy.TargetHandle;
+            if (target == IntPtr.Zero || !NativeMethods.IsWindow(target)) return;
+            Activate(target);
+        };
+
+        _altTabProxy.Show();
+    }
+
+    /// <summary>
+    /// 把悬浮栏限制在屏幕范围内：四周都保加强制间距，
+    /// 既不能被拖出屏幕被裁掉，也不能贴死在屏幕边缘上。
+    /// </summary>
+    private void ClampToScreen()
+    {
+        const double margin = 10;
+
+        double vLeft = SystemParameters.VirtualScreenLeft;
+        double vTop = SystemParameters.VirtualScreenTop;
+        double vRight = vLeft + SystemParameters.VirtualScreenWidth;
+        double vBottom = vTop + SystemParameters.VirtualScreenHeight;
+
+        double minLeft = vLeft + margin;
+        double minTop = vTop + margin;
+        double maxLeft = vRight - ActualWidth - margin;
+        double maxTop = vBottom - ActualHeight - margin;
+
+        if (maxLeft < minLeft) maxLeft = minLeft;
+        if (maxTop < minTop) maxTop = minTop;
+
+        double left = Math.Clamp(Left, minLeft, maxLeft);
+        double top = Math.Clamp(Top, minTop, maxTop);
+
+        if (Math.Abs(left - Left) > 0.1) Left = left;
+        if (Math.Abs(top - Top) > 0.1) Top = top;
+    }
+
     protected override void OnRenderSizeChanged(SizeChangedInfo info)
     {
         base.OnRenderSizeChanged(info);
@@ -446,6 +522,28 @@ public partial class DockWindow : Window
         if (snapshot.Foreground != EnsureOurHandle())
         {
             _activeWindow = snapshot.Foreground;
+        }
+
+        // 单独记下"最后在用的文件夹窗口"：ALT+TAB 替身要显示它、切到它
+        if (snapshot.Foreground != IntPtr.Zero &&
+            snapshot.Windows.Any(w => w.Handle == snapshot.Foreground))
+        {
+            _lastActiveFolder = snapshot.Foreground;
+            EnsureAltTabProxy();
+        }
+
+        // 还没记录过"最后在用"的文件夹时，先拿列表里第一个顶上，
+        // 保证 ALT+TAB 替身一启动就有内容
+        if (_lastActiveFolder == IntPtr.Zero && snapshot.Windows.Count > 0)
+        {
+            _lastActiveFolder = snapshot.Windows[0].Handle;
+            EnsureAltTabProxy();
+        }
+
+        if (_altTabProxy is not null && _lastActiveFolder != IntPtr.Zero)
+        {
+            var info = snapshot.Windows.FirstOrDefault(w => w.Handle == _lastActiveFolder);
+            _altTabProxy.AttachTo(_lastActiveFolder, info?.Title ?? "文件夹");
         }
 
         var seen = new HashSet<IntPtr>();
@@ -792,7 +890,7 @@ public partial class DockWindow : Window
     {
         var menu = new ContextMenu();
 
-        menu.Items.Add(CheckItem("接管任务栏（摘除文件夹按钮）", App.Settings.TakeoverEnabled, Host.SetTakeover));
+        menu.Items.Add(CheckItem("接管任务栏（合并文件夹按钮）", App.Settings.TakeoverEnabled, Host.SetTakeover));
         menu.Items.Add(CheckItem("没有文件夹时自动隐藏", App.Settings.HideWhenEmpty, Host.SetHideWhenEmpty));
         menu.Items.Add(CheckItem("显示完整标题", App.Settings.ShowFullTitle, v =>
         {

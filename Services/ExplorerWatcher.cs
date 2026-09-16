@@ -224,11 +224,19 @@ public sealed class ExplorerWatcher : IDisposable
     {
         if (TakeoverEnabled)
         {
+            // 摘掉任务栏按钮（Win11 上这一步会连带把窗口从 ALT+TAB 移除）
             _taskbar.Remove(hwnd);
+
+            // 紧接着强制一次框架刷新，试着让 shell 把窗口重新登记回 ALT+TAB
+            NativeMethods.SetWindowPos(
+                hwnd, IntPtr.Zero, 0, 0, 0, 0,
+                NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOZORDER |
+                NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_FRAMECHANGED);
         }
         else
         {
-            _taskbar.Restore(hwnd);
+            AppUserModelId.TrySet(hwnd, null);
+            _taskbar.Restore(hwnd); // 兼容旧版本可能留下的"已摘除"状态
         }
     }
 
@@ -239,6 +247,7 @@ public sealed class ExplorerWatcher : IDisposable
         {
             try
             {
+                AppUserModelId.TrySet(info.Handle, null);
                 _taskbar.Restore(info.Handle);
             }
             catch
