@@ -27,6 +27,7 @@ public partial class DockWindow : Window
     private ShadowWindow? _shadow;
     private ExplorerSnapshot? _lastSnapshot;
     private readonly DispatcherTimer _topmostTimer;
+    private DateTime _lastTopmostFix = DateTime.MinValue;
 
     private Brush _backgroundBrush = Brushes.Transparent;
     private Brush _borderBrush = Brushes.Transparent;
@@ -305,7 +306,9 @@ public partial class DockWindow : Window
 
     /// <summary>
     /// 把悬浮栏重新钉回最上层，并保持阴影层压在它下面。
-    /// 拖动其它窗口时 Windows 会把被拖窗口临时提到最前，被挤掉的置顶靠这个找回来。
+    /// 只在"命中测试发现真的被压在下面"时才动手：光看 WS_EX_TOPMOST 样式不够，
+    /// 因为别的置顶窗口（照片、播放器等）会把它挤到 Topmost 组内的后面，
+    /// 那时样式还在，但点上去的其实是别人。
     /// </summary>
     private void EnsureTopmost()
     {
@@ -313,32 +316,47 @@ public partial class DockWindow : Window
 
         var dockHandle = EnsureOurHandle();
         if (dockHandle == IntPtr.Zero) return;
+        if (ActualWidth <= 0 || ActualHeight <= 0) return;
 
-        long style = NativeMethods.GetWindowLongPtr(dockHandle, NativeMethods.GWL_EXSTYLE);
-        bool wasTopmost = (style & NativeMethods.WS_EX_TOPMOST) != 0;
+        var shadowHandle = ShadowHandle();
 
-        bool ok = NativeMethods.SetWindowPos(
-            dockHandle,
-            NativeMethods.HWND_TOPMOST,
-            0, 0, 0, 0,
-            NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
-
-        if (!wasTopmost)
+        var probe = new NativeMethods.POINT
         {
-            long now = NativeMethods.GetWindowLongPtr(dockHandle, NativeMethods.GWL_EXSTYLE);
-            Diag($"topmost repair: ok={ok} before={wasTopmost} after={(now & NativeMethods.WS_EX_TOPMOST) != 0}");
+            X = (int)Math.Round(Left + (ActualWidth / 2)),
+            Y = (int)Math.Round(Top + (ActualHeight / 2)),
+        };
+
+        var top = NativeMethods.WindowFromPoint(probe);
+        bool covered = top != IntPtr.Zero && top != dockHandle && top != shadowHandle;
+
+        if (covered && (DateTime.UtcNow - _lastTopmostFix).TotalSeconds > 1.5)
+        {
+            _lastTopmostFix = DateTime.UtcNow;
+
+            // 先落到普通层再重新置顶，才能挤进 Topmost 组的最前面（只改样式是插不了队的）
+            NativeMethods.SetWindowPos(dockHandle, NativeMethods.HWND_NOTOPMOST, 0, 0, 0, 0,
+                NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
+            NativeMethods.SetWindowPos(dockHandle, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
+                NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
+            NativeMethods.SetWindowPos(shadowHandle, dockHandle, 0, 0, 0, 0,
+                NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
+
+            Diag($"topmost: covered by 0x{top.ToInt64():X}, re-pinned");
+            return;
         }
 
-        if (_shadow is null) return;
+        // 没被盖住时只需保证阴影层还在自己下面
+        if (shadowHandle != IntPtr.Zero)
+        {
+            NativeMethods.SetWindowPos(shadowHandle, dockHandle, 0, 0, 0, 0,
+                NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
+        }
+    }
 
-        var shadowHandle = new WindowInteropHelper(_shadow).Handle;
-        if (shadowHandle == IntPtr.Zero) return;
-
-        NativeMethods.SetWindowPos(
-            shadowHandle,
-            dockHandle,
-            0, 0, 0, 0,
-            NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
+    private IntPtr ShadowHandle()
+    {
+        if (_shadow is null) return IntPtr.Zero;
+        return new WindowInteropHelper(_shadow).Handle;
     }
 
     protected override void OnRenderSizeChanged(SizeChangedInfo info)
