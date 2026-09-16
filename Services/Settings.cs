@@ -4,18 +4,48 @@ using System.Text.Json.Serialization;
 
 namespace ExplorerDock.Services;
 
-/// <summary>悬浮栏配色：跟随系统 / 强制深色 / 强制浅色。</summary>
+/// <summary>悬浮栏配色：跟随系统 / 强制深色 / 强制浅色 / 自定义。</summary>
 public enum DockTheme
 {
     Auto = 0,
     Dark = 1,
     Light = 2,
+    Custom = 3,
 }
 
 public sealed class Settings
 {
     /// <summary>悬浮栏与菜单的配色方案。</summary>
     public DockTheme Theme { get; set; } = DockTheme.Auto;
+
+    // ---------- 自定义主题 ----------
+
+    /// <summary>背景色，格式 #AARRGGBB。</summary>
+    public string CustomBackground { get; set; } = "#FA1B1B1F";
+
+    /// <summary>描边色。</summary>
+    public string CustomBorder { get; set; } = "#402E2E2E";
+
+    /// <summary>普通状态文字色。</summary>
+    public string CustomText { get; set; } = "#FFF2F2F2";
+
+    /// <summary>鼠标悬浮时的高亮底色。</summary>
+    public string CustomHover { get; set; } = "#1CFFFFFF";
+
+    /// <summary>当前活动窗口的高亮底色。</summary>
+    public string CustomActive { get; set; } = "#3DFFFFFF";
+
+    /// <summary>高亮时的文字反色。</summary>
+    public string CustomActiveText { get; set; } = "#FFFFFFFF";
+
+    /// <summary>描边线宽。</summary>
+    public double CustomBorderThickness { get; set; } = 2;
+
+    /// <summary>整体缩放（1.0 = 100%，3.0 = 300%），图标/字号/间距/圆角等比放大。</summary>
+    public double Scale { get; set; } = 1.0;
+
+    /// <summary>字体名。</summary>
+    public string FontFamily { get; set; } = "Microsoft YaHei UI";
 
     /// <summary>是否把资源管理器窗口从任务栏摘除（核心功能）。</summary>
     public bool TakeoverEnabled { get; set; } = true;
@@ -51,17 +81,33 @@ public sealed class Settings
     {
         if (Theme == DockTheme.Light) return true;
         if (Theme == DockTheme.Dark) return false;
+        if (Theme == DockTheme.Custom) return false;
 
+        return IsSystemLightTheme();
+    }
+
+    /// <summary>
+    /// 读系统的浅色/深色偏好。
+    /// 应用要看 AppsUseLightTheme（SystemUsesLightTheme 是给任务栏/开始菜单用的），
+    /// 前者读不到时退回后者。
+    /// </summary>
+    public static bool IsSystemLightTheme()
+    {
         try
         {
             using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
                 @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
-            return key?.GetValue("SystemUsesLightTheme") is int value && value == 1;
+            if (key is null) return false;
+
+            if (key.GetValue("AppsUseLightTheme") is int apps) return apps == 1;
+            if (key.GetValue("SystemUsesLightTheme") is int system) return system == 1;
         }
         catch
         {
-            return false;
+            // 读不到就当深色
         }
+
+        return false;
     }
 
     public static Settings Load()

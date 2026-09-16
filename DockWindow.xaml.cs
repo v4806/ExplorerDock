@@ -29,7 +29,26 @@ public partial class DockWindow : Window
     private readonly DispatcherTimer _topmostTimer;
     private DateTime _lastTopmostFix = DateTime.MinValue;
     private bool _dragging;
+    private Point _pressPoint;
     private IntPtr _lastActiveFolder;
+    private double _scale = 1.0;
+    private FontFamily _fontFamily = new("Microsoft YaHei UI");
+    private bool _lastSystemLight;
+
+    /// <summary>
+    /// "跟随系统"要真的跟：定时比对系统浅色/深色偏好，变了就整体换色。
+    /// （之前只在启动时读一次，所以系统切换后毫无反应。）
+    /// </summary>
+    private void FollowSystemTheme()
+    {
+        if (App.Settings.Theme != DockTheme.Auto) return;
+
+        bool light = Settings.IsSystemLightTheme();
+        if (light == _lastSystemLight) return;
+
+        _lastSystemLight = light;
+        Host.PreviewTheme();
+    }
 
     private Brush _backgroundBrush = Brushes.Transparent;
     private Brush _borderBrush = Brushes.Transparent;
@@ -88,13 +107,46 @@ public partial class DockWindow : Window
             UpdateShadowBounds();
         };
 
+        // 整条悬浮栏任意位置按住都能拖：先记下按下的位置，
+        // 只有鼠标移动超过阈值时才升级成拖动 —— 直接调 DragMove() 会捕获鼠标，
+        // 按钮的"松开"就收不到、点击会失效。
+        PreviewMouseLeftButtonDown += (_, e) => _pressPoint = e.GetPosition(this);
+
+        PreviewMouseMove += (_, e) =>
+        {
+            if (e.LeftButton != MouseButtonState.Pressed) return;
+            if (_dragging) return;
+
+            var current = e.GetPosition(this);
+            if (Math.Abs(current.X - _pressPoint.X) < 4 && Math.Abs(current.Y - _pressPoint.Y) < 4) return;
+
+            _dragging = true;
+            try
+            {
+                DragMove();
+            }
+            catch
+            {
+                // 拖动被打断，忽略
+            }
+
+            _dragging = false;
+            _autoCenter = false;
+            ClampToScreen();
+            SavePosition();
+        };
+
         // 拖动别的窗口时 Windows 会临时把被拖窗口提到最前，我们的置顶可能被挤掉；
         // 定时重新钉一遍，被遮住也能自己回来
         _topmostTimer = new DispatcherTimer(DispatcherPriority.Background)
         {
             Interval = TimeSpan.FromMilliseconds(800),
         };
-        _topmostTimer.Tick += (_, _) => EnsureTopmost();
+        _topmostTimer.Tick += (_, _) =>
+        {
+            EnsureTopmost();
+            FollowSystemTheme();
+        };
 
         MouseRightButtonUp += (_, e) =>
         {
@@ -103,44 +155,116 @@ public partial class DockWindow : Window
         };
     }
 
+    /// <summary>
+    /// 悬浮栏不进 ALT+TAB：加 WS_EX_TOOLWINDOW。
+    /// 任务栏按钮本来就已经被 ShowInTaskbar=false 摘掉了，这里再把切换列表里的那一项也去掉。
+    /// </summary>
+    protected override void OnSourceInitialized(EventArgs e)
+    {
+        base.OnSourceInitialized(e);
+
+        var handle = new WindowInteropHelper(this).Handle;
+        if (handle == IntPtr.Zero) return;
+
+        long style = NativeMethods.GetWindowLongPtr(handle, NativeMethods.GWL_EXSTYLE);
+        NativeMethods.SetWindowLongPtr(
+            handle,
+            NativeMethods.GWL_EXSTYLE,
+            (style | NativeMethods.WS_EX_TOOLWINDOW) & ~NativeMethods.WS_EX_APPWINDOW);
+    }
+
     // ---------- 外观 ----------
 
     private void ApplyTheme()
     {
-        bool light = App.Settings.ResolveLightTheme();
+        var settings = App.Settings;
 
-        if (light)
+        if (settings.Theme == DockTheme.Custom)
         {
-            // 浅色：白底 + 深色描边，活动项用深色块反白，对比明确
-            _backgroundBrush = new SolidColorBrush(Color.FromArgb(0xFA, 0xFA, 0xFA, 0xFA));
-            _borderBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0x24, 0x24, 0x24));
-            _textBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0x1A, 0x1A, 0x1A));
-            _hoverBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0x55, 0x55, 0x55));
-            _activeBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0x24, 0x24, 0x24));
-            _activeBorderBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0x24, 0x24, 0x24));
-            _onActiveTextBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));
-            _onHoverTextBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));
-            _chipBrush = new SolidColorBrush(Color.FromArgb(0x24, 0x00, 0x00, 0x00));
-            _mutedBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0x55, 0x55, 0x55));
+            _backgroundBrush = ParseBrush(settings.CustomBackground, Color.FromArgb(0xFA, 0x1B, 0x1B, 0x1F));
+            _borderBrush = ParseBrush(settings.CustomBorder, Color.FromArgb(0x40, 0x2E, 0x2E, 0x2E));
+            var tc = (ParseBrush(settings.CustomText, Color.FromArgb(0xFF, 0xF2, 0xF2, 0xF2)) as SolidColorBrush)?.Color ?? Colors.White;
+            _textBrush = new SolidColorBrush(tc);
+            _hoverBrush = ParseBrush(settings.CustomHover, Color.FromArgb(0x1C, 0xFF, 0xFF, 0xFF));
+            _activeBrush = ParseBrush(settings.CustomActive, Color.FromArgb(0x3D, 0xFF, 0xFF, 0xFF));
+            _onActiveTextBrush = ParseBrush(settings.CustomActiveText, Colors.White);
+            _onHoverTextBrush = _onActiveTextBrush;
+            _activeBorderBrush = Brushes.Transparent;
+            _chipBrush = new SolidColorBrush(Color.FromArgb(0x2E, 0xFF, 0xFF, 0xFF));
+            _mutedBrush = new SolidColorBrush(Color.FromArgb(0xB4, tc.R, tc.G, tc.B));
+
+            RootBorder.BorderThickness = new Thickness(Math.Clamp(settings.CustomBorderThickness, 0, 8));
         }
         else
         {
-            _backgroundBrush = new SolidColorBrush(Color.FromArgb(0xF2, 0x1B, 0x1B, 0x1F));
-            _borderBrush = new SolidColorBrush(Color.FromArgb(0x40, 0xFF, 0xFF, 0xFF));
-            _textBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0xF2, 0xF2, 0xF2));
-            _hoverBrush = new SolidColorBrush(Color.FromArgb(0x1C, 0xFF, 0xFF, 0xFF));
-            _activeBrush = new SolidColorBrush(Color.FromArgb(0x3D, 0xFF, 0xFF, 0xFF));
-            _activeBorderBrush = new SolidColorBrush(Color.FromArgb(0x4D, 0xFF, 0xFF, 0xFF));
-            _onActiveTextBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));
-            _onHoverTextBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));
-            _chipBrush = new SolidColorBrush(Color.FromArgb(0x3D, 0xFF, 0xFF, 0xFF));
-            _mutedBrush = new SolidColorBrush(Color.FromArgb(0x8C, 0xFF, 0xFF, 0xFF));
+            bool light = settings.ResolveLightTheme();
+            RootBorder.BorderThickness = new Thickness(4);
+
+            if (light)
+            {
+                // 浅色：纯白底 + #333 深描边，活动项深灰块反白
+                // （底色保留一点透明度，否则刚做好的透光效果会被全不透明的 #FFFFFF 盖掉）
+                _backgroundBrush = new SolidColorBrush(Color.FromArgb(0xD8, 0xFF, 0xFF, 0xFF));
+                _borderBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0x33, 0x33, 0x33));
+                _textBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0x00, 0x00, 0x00));
+                _hoverBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0x55, 0x55, 0x55));
+                _activeBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0x33, 0x33, 0x33));
+                _activeBorderBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0x33, 0x33, 0x33));
+                _onActiveTextBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));
+                _onHoverTextBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));
+                _chipBrush = new SolidColorBrush(Color.FromArgb(0x24, 0x00, 0x00, 0x00));
+                _mutedBrush = new SolidColorBrush(Color.FromArgb(0x99, 0x00, 0x00, 0x00));
+            }
+            else
+            {
+                // 深色：近黑底 + #555 灰描边（原来是 25% 白，太亮）
+                _backgroundBrush = new SolidColorBrush(Color.FromArgb(0xD8, 0x1A, 0x1A, 0x1A));
+                _borderBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0x55, 0x55, 0x55));
+                _textBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));
+                _hoverBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0x33, 0x33, 0x33));
+                _activeBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0x55, 0x55, 0x55));
+                _activeBorderBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0x55, 0x55, 0x55));
+                _onActiveTextBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));
+                _onHoverTextBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0xFF, 0xFF, 0xFF));
+                _chipBrush = new SolidColorBrush(Color.FromArgb(0x3D, 0xFF, 0xFF, 0xFF));
+                _mutedBrush = new SolidColorBrush(Color.FromArgb(0xB4, 0xFF, 0xFF, 0xFF));
+            }
         }
+
+        // 字号 / 图标 / 间距等比缩放：直接给内容层套一个 LayoutTransform，
+        // 边框画在外层 Border 上，所以线宽不会被这个缩放放大。
+        _scale = Math.Clamp(settings.Scale, 1.0, 3.0);
+        if (RootPanel.LayoutTransform is not ScaleTransform transform ||
+            Math.Abs(transform.ScaleX - _scale) > 0.001)
+        {
+            RootPanel.LayoutTransform = new ScaleTransform(_scale, _scale);
+        }
+
+        _fontFamily = new FontFamily(
+            string.IsNullOrWhiteSpace(settings.FontFamily) ? "Microsoft YaHei UI" : settings.FontFamily);
 
         RootBorder.Background = _backgroundBrush;
         RootBorder.BorderBrush = _borderBrush;
 
         if (_grip is not null && _grip.Child is TextBlock dots) dots.Foreground = _mutedBrush;
+    }
+
+    /// <summary>把 #AARRGGBB 之类的字符串解析成刷子，解析失败就用兜底色。</summary>
+    private static Brush ParseBrush(string? text, Color fallback)
+    {
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(text) && ColorConverter.ConvertFromString(text) is Color color)
+            {
+                return new SolidColorBrush(color);
+            }
+        }
+        catch
+        {
+            // 用户输入了非法颜色，用兜底
+        }
+
+        return new SolidColorBrush(fallback);
     }
 
     /// <summary>主题切换后整体换色：按钮视觉持有刷子引用，所以直接重建一批。</summary>
@@ -159,7 +283,7 @@ public partial class DockWindow : Window
         {
             var borderColor = (_borderBrush as SolidColorBrush)?.Color ?? Color.FromArgb(0xFF, 0x24, 0x24, 0x24);
             _shadow.SetTone(
-                Color.FromArgb(0xFF, borderColor.R, borderColor.G, borderColor.B),
+                Color.FromArgb((_backgroundBrush as SolidColorBrush)?.Color.A ?? (byte)0xFF, borderColor.R, borderColor.G, borderColor.B),
                 RootBorder.CornerRadius.TopLeft,
                 App.Settings.ResolveLightTheme());
             _shadow.SetInset(0);
@@ -264,6 +388,7 @@ public partial class DockWindow : Window
         }
 
         EnsureShadow();
+        _lastSystemLight = Settings.IsSystemLightTheme();
         _topmostTimer.Start();
     }
 
@@ -275,13 +400,24 @@ public partial class DockWindow : Window
             _shadow = new ShadowWindow();
             var borderColor = (_borderBrush as SolidColorBrush)?.Color ?? Color.FromArgb(0xFF, 0x24, 0x24, 0x24);
             _shadow.SetTone(
-                Color.FromArgb(0xFF, borderColor.R, borderColor.G, borderColor.B),
+                Color.FromArgb((_backgroundBrush as SolidColorBrush)?.Color.A ?? (byte)0xFF, borderColor.R, borderColor.G, borderColor.B),
                 RootBorder.CornerRadius.TopLeft,
                 App.Settings.ResolveLightTheme());
             _shadow.SetInset(0);
             _shadow.Show();
         }
 
+        UpdateShadowBounds();
+    }
+
+    /// <summary>
+    /// 重新排一次层级：阴影窗口必须压在悬浮栏下面。
+    /// Show() 之后 z 序可能反转，不排一次就会看到整条变成一块纯色（那是垫底的阴影矩形）。
+    /// </summary>
+    public void ReorderLayers()
+    {
+        EnsureShadow();
+        UpdateShadowBounds();
         UpdateShadowBounds();
     }
 
@@ -553,7 +689,7 @@ public partial class DockWindow : Window
 
         var label = new TextBlock
         {
-            FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI"),
+            FontFamily = _fontFamily,
             FontSize = 12.5,
             Foreground = _textBrush,
             Margin = new Thickness(9, 0, 0, 0),
@@ -621,7 +757,7 @@ public partial class DockWindow : Window
         panel.Children.Add(new TextBlock
         {
             Text = info.Title,
-            FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI"),
+            FontFamily = _fontFamily,
             FontSize = 12.5,
             FontWeight = FontWeights.SemiBold,
             Foreground = _textBrush,
@@ -633,7 +769,7 @@ public partial class DockWindow : Window
             panel.Children.Add(new TextBlock
             {
                 Text = info.LocationPath,
-                FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI"),
+                FontFamily = _fontFamily,
                 FontSize = 11.5,
                 Margin = new Thickness(0, 3, 0, 0),
                 Foreground = _mutedBrush,
@@ -676,7 +812,7 @@ public partial class DockWindow : Window
             Child = new TextBlock
             {
                 Text = key,
-                FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI"),
+                FontFamily = _fontFamily,
                 FontSize = 10.5,
                 Foreground = _textBrush,
             },
@@ -685,7 +821,7 @@ public partial class DockWindow : Window
         panel.Children.Add(new TextBlock
         {
             Text = description,
-            FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI"),
+            FontFamily = _fontFamily,
             FontSize = 11,
             Margin = new Thickness(6, 0, 0, 0),
             Foreground = _mutedBrush,
@@ -819,7 +955,6 @@ public partial class DockWindow : Window
         copy.IsEnabled = !string.IsNullOrWhiteSpace(visual.Info.LocationPath);
         menu.Items.Add(copy);
 
-        menu.Items.Add(MenuAction("临时放回任务栏", () => Host.RestoreToTaskbar(visual.Handle)));
         menu.Items.Add(new Separator());
         menu.Items.Add(MenuAction("关闭这个文件夹窗口", () => CloseWindow(visual.Handle)));
         menu.Items.Add(MenuAction("关闭所有文件夹窗口", App.CloseAllExplorerWindows));
@@ -832,6 +967,68 @@ public partial class DockWindow : Window
     {
         var menu = BuildAppMenu();
         menu.PlacementTarget = this;
+
+        // 跟着鼠标弹：这样托盘的右键也能复用同一套菜单
+        menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
+        menu.IsOpen = true;
+    }
+
+    /// <summary>托盘右键用：弹出与悬浮栏完全相同的深色菜单。</summary>
+    public void ShowAppMenuAtMouse()
+    {
+        if (!IsVisible) Show();
+        ShowMenu();
+    }
+
+    private Window? _trayMenuHost;
+
+    /// <summary>
+    /// 托盘右键的菜单：用一个贴在鼠标位置、可被激活的宿主窗口来承载，
+    /// 而不是让菜单孤零零地挂在悬浮栏上 ——
+    /// 之前那样在托盘右键时悬浮栏不是前台窗口，菜单拿不到焦点，
+    /// 就判断不出"点击落在菜单外"，于是关不掉。
+    /// </summary>
+    public void ShowTrayMenu()
+    {
+        if (!NativeMethods.GetCursorPos(out var cursor)) return;
+
+        if (_trayMenuHost is null)
+        {
+            _trayMenuHost = new Window
+            {
+                WindowStyle = WindowStyle.None,
+                AllowsTransparency = true,
+                Background = Brushes.Transparent,
+                ShowInTaskbar = false,
+                ShowActivated = true,
+                Topmost = true,
+                Width = 1,
+                Height = 1,
+                Left = -32000,
+                Top = -32000,
+                Title = "ExplorerDock",
+            };
+
+            _trayMenuHost.Closed += (_, _) => _trayMenuHost = null;
+            _trayMenuHost.Show();
+        }
+
+        // 用物理坐标直接摆位，绕开 DPI 逻辑单位换算
+        var handle = new WindowInteropHelper(_trayMenuHost).Handle;
+        NativeMethods.SetWindowPos(
+            handle,
+            NativeMethods.HWND_TOPMOST,
+            cursor.X,
+            cursor.Y,
+            1,
+            1,
+            NativeMethods.SWP_SHOWWINDOW | NativeMethods.SWP_NOACTIVATE);
+
+        _trayMenuHost.Activate();
+
+        var menu = BuildAppMenu();
+        menu.PlacementTarget = _trayMenuHost;
+        menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
         menu.IsOpen = true;
     }
 
@@ -849,18 +1046,22 @@ public partial class DockWindow : Window
         }));
         menu.Items.Add(new Separator());
 
-        // 主题三项必须互斥：WPF 的 IsCheckable 会自己翻转勾选，所以点完要统一刷新一遍
+        // 主题四项必须互斥：WPF 的 IsCheckable 会自己翻转勾选，所以点完要统一刷新一遍
         MenuItem? themeAuto = null;
         MenuItem? themeDark = null;
         MenuItem? themeLight = null;
+        MenuItem? themeCustom = null;
 
         themeAuto = CheckItem("主题：跟随系统", App.Settings.Theme == DockTheme.Auto, _ => SelectTheme(DockTheme.Auto));
         themeDark = CheckItem("主题：深色", App.Settings.Theme == DockTheme.Dark, _ => SelectTheme(DockTheme.Dark));
         themeLight = CheckItem("主题：浅色", App.Settings.Theme == DockTheme.Light, _ => SelectTheme(DockTheme.Light));
+        themeCustom = CheckItem("主题：自定义", App.Settings.Theme == DockTheme.Custom, _ => SelectTheme(DockTheme.Custom));
 
         menu.Items.Add(themeAuto);
         menu.Items.Add(themeDark);
         menu.Items.Add(themeLight);
+        menu.Items.Add(themeCustom);
+        menu.Items.Add(MenuAction("自定义主题设置…", Host.OpenThemeEditor));
 
         void SelectTheme(DockTheme theme)
         {
@@ -869,12 +1070,16 @@ public partial class DockWindow : Window
             if (themeAuto is not null) themeAuto.IsChecked = App.Settings.Theme == DockTheme.Auto;
             if (themeDark is not null) themeDark.IsChecked = App.Settings.Theme == DockTheme.Dark;
             if (themeLight is not null) themeLight.IsChecked = App.Settings.Theme == DockTheme.Light;
+            if (themeCustom is not null) themeCustom.IsChecked = App.Settings.Theme == DockTheme.Custom;
         }
 
         menu.Items.Add(new Separator());
         menu.Items.Add(CheckItem("开机自动启动", App.Settings.RunAtStartup, Host.SetRunAtStartup));
         menu.Items.Add(MenuAction("回到屏幕顶部居中", ResetPosition));
-        menu.Items.Add(MenuAction("隐藏悬浮栏", () => Host.SetShowDock(false)));
+        // 这一项随状态换文案，隐藏之后还能从同一个位置再点回来
+        menu.Items.Add(MenuAction(
+            App.Settings.ShowDock ? "隐藏悬浮栏" : "显示悬浮栏",
+            () => Host.SetShowDock(!App.Settings.ShowDock)));
         menu.Items.Add(new Separator());
         menu.Items.Add(MenuAction("关闭所有文件夹窗口", App.CloseAllExplorerWindows));
         menu.Items.Add(MenuAction("重启资源管理器", App.RestartExplorer));

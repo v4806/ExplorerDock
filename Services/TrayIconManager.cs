@@ -46,6 +46,9 @@ public sealed class TrayIconManager : IDisposable
 
         _menu = new ContextMenuStrip
         {
+            // 勾号需要左侧那条 check 边距，ShowCheckMargin 默认是 false，
+            // 不打开的话 ToolStripDropDownMenu 根本不会去画勾（渲染器里的 OnRenderItemCheck 也就白写了）
+            ShowCheckMargin = true,
             ShowImageMargin = false,
             Renderer = new DarkMenuRenderer(),
             BackColor = Color.FromArgb(27, 27, 31),
@@ -71,28 +74,45 @@ public sealed class TrayIconManager : IDisposable
 
         _menu.Opening += (_, _) => RefreshChecks();
 
+        // 统一左右内边距：左侧那条是 ShowCheckMargin 留出的勾号列，
+        // 文字到右边缘的间距跟它取齐，免得左边一大块空白、右边贴着边
+        foreach (ToolStripItem item in _menu.Items)
+        {
+            if (item is ToolStripMenuItem menuItem)
+            {
+                menuItem.Padding = new Padding(4, 5, 12, 5);
+            }
+        }
+
         _notifyIcon = new NotifyIcon
         {
             Text = "ExplorerDock — 文件夹悬浮栏",
             Icon = LoadIcon(),
-            ContextMenuStrip = _menu,
             Visible = true,
         };
 
+        // 托盘右键弹出与悬浮栏完全相同的 WPF 现代菜单
+        // （不再用 WinForms 的原生菜单：圆角、阴影、间距、高亮全做不了）
+        _notifyIcon.MouseUp += (_, e) =>
+        {
+            if (e.Button == MouseButtons.Right) _app.ShowTrayMenu();
+        };
+
+        // 双击 = 显示/隐藏悬浮栏（单键快捷开关）
         _notifyIcon.DoubleClick += (_, _) => _app.SetShowDock(!App.Settings.ShowDock);
+
+        // 托盘左键/双击不绑定动作：悬浮栏自动显隐并保持置顶，用不到这个入口；
 
         RefreshChecks();
         ApplyTheme();
     }
 
-    /// <summary>托盘菜单跟随主题：深色用自定义渲染器，浅色交回系统默认。</summary>
+    /// <summary>托盘菜单同样保持深色：切回系统默认会变成白底，与整体割裂。</summary>
     public void ApplyTheme()
     {
-        bool light = App.Settings.ResolveLightTheme();
-
-        _menu.Renderer = light ? new ToolStripProfessionalRenderer() : new DarkMenuRenderer();
-        _menu.BackColor = light ? Color.FromArgb(0xF7, 0xF7, 0xF8) : Color.FromArgb(27, 27, 31);
-        _menu.ForeColor = light ? Color.FromArgb(26, 26, 26) : Color.FromArgb(242, 242, 242);
+        _menu.Renderer = new DarkMenuRenderer();
+        _menu.BackColor = Color.FromArgb(27, 27, 31);
+        _menu.ForeColor = Color.FromArgb(242, 242, 242);
     }
 
     private void RefreshChecks()
@@ -108,18 +128,20 @@ public sealed class TrayIconManager : IDisposable
 
     private static Icon LoadIcon()
     {
-        var handle = ShellInterop.GetFolderHIcon(small: false);
-        if (handle != IntPtr.Zero)
+        // 用应用自身的图标（csproj 里的 ApplicationIcon）。
+        // 之前是直接取系统的文件夹图标，和资源管理器长得一样，太难认。
+        try
         {
-            try
+            var path = Environment.ProcessPath;
+            if (!string.IsNullOrWhiteSpace(path))
             {
-                var source = Icon.FromHandle(handle);
-                return (Icon)source.Clone();
+                var icon = Icon.ExtractAssociatedIcon(path);
+                if (icon is not null) return icon;
             }
-            finally
-            {
-                ShellInterop.DestroyIcon(handle);
-            }
+        }
+        catch
+        {
+            // 取不到就退回系统图标
         }
 
         return SystemIcons.Application;
@@ -135,21 +157,24 @@ public sealed class TrayIconManager : IDisposable
 /// <summary>托盘菜单的深色配色，跟悬浮栏保持一致。</summary>
 internal sealed class DarkMenuColorTable : ProfessionalColorTable
 {
-    private static readonly Color Background = Color.FromArgb(27, 27, 31);
-    private static readonly Color Hover = Color.FromArgb(38, 255, 255, 255);
-    private static readonly Color Line = Color.FromArgb(31, 255, 255, 255);
+    internal static readonly Color Background = Color.FromArgb(0xFF, 0x1B, 0x1B, 0x1F);
+    internal static readonly Color Hover = Color.FromArgb(0xFF, 0x3A, 0x3A, 0x42);
+    private static readonly Color Line = Color.FromArgb(0x2E, 0xFF, 0xFF, 0xFF);
+
+    // 注：ProfessionalColorTable.UseSystemColors 不是 virtual，改不了；
+    // 选中色由 DarkMenuRenderer.OnRenderMenuItemBackground 自绘保证
 
     public override Color ToolStripDropDownBackground => Background;
     public override Color ImageMarginGradientBegin => Background;
     public override Color ImageMarginGradientMiddle => Background;
     public override Color ImageMarginGradientEnd => Background;
-    public override Color MenuBorder => Color.FromArgb(51, 255, 255, 255);
+    public override Color MenuBorder => Color.FromArgb(0x33, 0xFF, 0xFF, 0xFF);
     public override Color MenuItemBorder => Color.Transparent;
     public override Color MenuItemSelected => Hover;
     public override Color MenuItemSelectedGradientBegin => Hover;
     public override Color MenuItemSelectedGradientEnd => Hover;
-    public override Color MenuItemPressedGradientBegin => Background;
-    public override Color MenuItemPressedGradientEnd => Background;
+    public override Color MenuItemPressedGradientBegin => Hover;
+    public override Color MenuItemPressedGradientEnd => Hover;
     public override Color SeparatorDark => Line;
     public override Color SeparatorLight => Line;
     public override Color CheckBackground => Hover;
@@ -172,15 +197,34 @@ internal sealed class DarkMenuRenderer : ToolStripProfessionalRenderer
         base.OnRenderItemText(e);
     }
 
+    /// <summary>
+    /// 选中/按下的背景自己画，不依赖颜色表回退 —— 之前那样在某些情况下会回退成系统强调色（亮蓝）。
+    /// </summary>
+    protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
+    {
+        var bounds = new Rectangle(Point.Empty, e.Item.Size);
+        var color = e.Item.Selected || e.Item.Pressed
+            ? DarkMenuColorTable.Hover
+            : DarkMenuColorTable.Background;
+
+        using var brush = new SolidBrush(color);
+        e.Graphics.FillRectangle(brush, bounds);
+    }
+
     protected override void OnRenderItemCheck(ToolStripItemImageRenderEventArgs e)
     {
+        // 在左侧 check 边距里画一个白色对勾（勾选状态在深色底上必须看得清）
         var bounds = e.Item.Bounds;
-        using var pen = new Pen(Color.FromArgb(240, 240, 240), 1.8f);
-
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
 
-        float x = bounds.Left + 3f;
+        float x = bounds.Left + 4f;
         float y = bounds.Top + (bounds.Height / 2f);
+
+        using var pen = new Pen(Color.FromArgb(245, 245, 245), 2f)
+        {
+            StartCap = LineCap.Round,
+            EndCap = LineCap.Round,
+        };
 
         e.Graphics.DrawLines(pen, new[]
         {

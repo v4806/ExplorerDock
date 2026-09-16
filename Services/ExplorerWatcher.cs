@@ -236,14 +236,10 @@ public sealed class ExplorerWatcher : IDisposable
     {
         if (TakeoverEnabled)
         {
-            // 摘掉任务栏按钮（Win11 上这一步会连带把窗口从 ALT+TAB 移除）
+            // 只做这一件事：摘掉任务栏按钮。
+            // 不要再跟着调 SetWindowPos(SWP_FRAMECHANGED) —— 那会让 shell 重新评估这个窗口、
+            // 把刚摘掉的按钮又加回来（v1.0.4 的遗留探索代码，实测对 Alt+Tab 也没帮助）。
             _taskbar.Remove(hwnd);
-
-            // 紧接着强制一次框架刷新，试着让 shell 把窗口重新登记回 ALT+TAB
-            NativeMethods.SetWindowPos(
-                hwnd, IntPtr.Zero, 0, 0, 0, 0,
-                NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOZORDER |
-                NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_FRAMECHANGED);
         }
         else
         {

@@ -89,6 +89,18 @@ public partial class App : Application
 
         _quitEvent = new EventWaitHandle(false, EventResetMode.ManualReset, QuitEventName);
         StartQuitListener();
+
+        // 调试用：ExplorerDock.exe --theme-editor 直接打开自定义主题面板
+        if (e.Args.Any(a => a.Equals("--theme-editor", StringComparison.OrdinalIgnoreCase)))
+        {
+            Dispatcher.BeginInvoke(new Action(OpenThemeEditor));
+        }
+
+        // 调试用：--appmenu 在鼠标位置弹出托盘那套菜单（用来验证外观与关闭行为）
+        if (e.Args.Any(a => a.Equals("--appmenu", StringComparison.OrdinalIgnoreCase)))
+        {
+            Dispatcher.BeginInvoke(new Action(() => ShowTrayMenu()));
+        }
     }
 
     private void StartQuitListener()
@@ -156,11 +168,17 @@ public partial class App : Application
         if (show)
         {
             Dock.Show();
+
+            // Show() 之后阴影层可能盖到悬浮栏上面（表现为整条变成一块纯色），
+            // 这里立刻重排一次层级
+            Dock.ReorderLayers();
             Dock.RefreshVisibility();
         }
         else
         {
-            Dock.Hide();
+            // 走 RefreshVisibility：它会 Hide() 悬浮栏**并把阴影层一起隐藏**。
+            // 之前只调 Hide()，画阴影那层留在原地，就成了一块同形状的纯色块。
+            Dock.RefreshVisibility();
         }
     }
 
@@ -241,22 +259,78 @@ public partial class App : Application
 
     // ---------- 主题 ----------
 
-    /// <summary>切换配色方案（跟随系统 / 深色 / 浅色）。</summary>
+    /// <summary>切换配色方案（跟随系统 / 深色 / 浅色 / 自定义）。</summary>
     public void SetTheme(DockTheme theme)
     {
         Settings.Theme = theme;
         Settings.Save();
+        PreviewTheme();
+    }
 
+    /// <summary>把当前设置立刻应用到悬浮栏、菜单与托盘（不保存）。</summary>
+    public void PreviewTheme()
+    {
         ApplyMenuTheme();
         Dock?.ApplyThemeAndRebuild();
         _tray?.ApplyTheme();
     }
 
+    /// <summary>托盘右键：弹出与悬浮栏相同的现代深色菜单。</summary>
+    public void ShowTrayMenu() => Dock?.ShowTrayMenu();
+
+    private ThemeEditorWindow? _themeEditor;
+
+    /// <summary>打开自定义主题设置面板。</summary>
+    public void OpenThemeEditor()
+    {
+        try
+        {
+            if (_themeEditor is { IsVisible: true })
+            {
+                _themeEditor.Activate();
+                return;
+            }
+
+            _themeEditor = new ThemeEditorWindow(this);
+            _themeEditor.Closed += (_, _) => _themeEditor = null;
+            _themeEditor.Show();
+        }
+        catch (Exception ex)
+        {
+            // 宁可弹个提示，也不要整个程序挂掉
+            MessageBox.Show(
+                $"自定义主题面板打开失败：\n\n{ex.GetType().Name}: {ex.Message}",
+                "ExplorerDock",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+        }
+    }
+
     /// <summary>菜单与提示气泡的配色走 DynamicResource，这里整体换一套刷子。</summary>
     public static void ApplyMenuTheme()
     {
-        bool light = Settings.ResolveLightTheme();
         var resources = Current.Resources;
+
+        // 自定义主题下，菜单与提示气泡也跟着悬浮栏的配色走
+        if (Settings.Theme == DockTheme.Custom)
+        {
+            var background = ParseColor(Settings.CustomBackground, Color.FromArgb(0xF2, 0x1B, 0x1B, 0x1F));
+            var border = ParseColor(Settings.CustomBorder, Color.FromArgb(0x33, 0xFF, 0xFF, 0xFF));
+            var text = ParseColor(Settings.CustomText, Color.FromArgb(0xFF, 0xF2, 0xF2, 0xF2));
+            var hover = ParseColor(Settings.CustomHover, Color.FromArgb(0x26, 0xFF, 0xFF, 0xFF));
+
+            // 菜单底色比悬浮栏实一点，否则叠在窗口上会看不清内容
+            resources["DockMenuBackground"] = new SolidColorBrush(Color.FromArgb(
+                Math.Max(background.A, (byte)0xE0), background.R, background.G, background.B));
+            resources["DockMenuBorder"] = new SolidColorBrush(border);
+            resources["DockMenuForeground"] = new SolidColorBrush(text);
+            resources["DockMenuHighlight"] = new SolidColorBrush(hover);
+            resources["DockMenuDisabled"] = new SolidColorBrush(Color.FromArgb(0x66, text.R, text.G, text.B));
+            resources["DockMenuSeparator"] = new SolidColorBrush(Color.FromArgb(0x26, text.R, text.G, text.B));
+            return;
+        }
+
+        bool light = Settings.ResolveLightTheme();
 
         if (light)
         {
@@ -270,12 +344,30 @@ public partial class App : Application
         else
         {
             resources["DockMenuBackground"] = new SolidColorBrush(Color.FromArgb(0xF2, 0x1B, 0x1B, 0x1F));
-            resources["DockMenuBorder"] = new SolidColorBrush(Color.FromArgb(0x33, 0xFF, 0xFF, 0xFF));
+            resources["DockMenuBorder"] = new SolidColorBrush(Color.FromArgb(0xFF, 0x3A, 0x3A, 0x42));
             resources["DockMenuForeground"] = new SolidColorBrush(Color.FromArgb(0xFF, 0xF2, 0xF2, 0xF2));
             resources["DockMenuHighlight"] = new SolidColorBrush(Color.FromArgb(0x26, 0xFF, 0xFF, 0xFF));
             resources["DockMenuDisabled"] = new SolidColorBrush(Color.FromArgb(0x5C, 0xFF, 0xFF, 0xFF));
             resources["DockMenuSeparator"] = new SolidColorBrush(Color.FromArgb(0x1F, 0xFF, 0xFF, 0xFF));
         }
+    }
+
+    /// <summary>把 #AARRGGBB 字符串解析成颜色，失败用兜底色。</summary>
+    private static Color ParseColor(string? text, Color fallback)
+    {
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(text) && ColorConverter.ConvertFromString(text) is Color color)
+            {
+                return color;
+            }
+        }
+        catch
+        {
+            // 非法输入用兜底
+        }
+
+        return fallback;
     }
 
     // ---------- 维护 ----------
