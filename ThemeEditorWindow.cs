@@ -15,12 +15,8 @@ namespace ExplorerDock;
 /// </summary>
 internal sealed class ThemeEditorWindow : Window
 {
-    private static readonly Color BackgroundColor = (Color)ColorConverter.ConvertFromString("#FF1E1E22");
-    private static readonly Color RowColor = (Color)ColorConverter.ConvertFromString("#FF2A2A30");
-    private static readonly Color BorderColor = (Color)ColorConverter.ConvertFromString("#FF3A3A42");
-    private static readonly Color TextColor = (Color)ColorConverter.ConvertFromString("#FFF0F0F0");
-    private static readonly Color AccentColor = (Color)ColorConverter.ConvertFromString("#FF4C8DF6");
-
+    // 外观（底色/文字/边框）一律取自 ThemePalette —— 编辑器自己也得跟主题走，
+    // 否则改完主题看到的是另一套风格。下面那排色板是**给用户挑的色值**，属于内容，不算外观。
     private static readonly string[] Palette =
     {
         "#00000000", "#40202020", "#80202020", "#C0202020", "#FF1B1B1F", "#FF202024", "#FF2A2A30", "#FF3A3A42",
@@ -31,10 +27,25 @@ internal sealed class ThemeEditorWindow : Window
 
     private readonly App _app;
     private readonly StackPanel _rows = new();
+    private readonly ThemePalette _palette = ThemePalette.Resolve();
+    private readonly Brush _panelBrush;
+    private readonly Brush _rowBrush;
+    private readonly Brush _borderBrush;
+    private readonly Brush _textBrush;
+    private readonly Brush _mutedBrush;
 
     public ThemeEditorWindow(App app)
     {
         _app = app;
+
+        var palette = _palette;
+        _panelBrush = new SolidColorBrush(Color.FromArgb(palette.SurfaceAlpha, palette.Background.R, palette.Background.G, palette.Background.B));
+        _rowBrush = new SolidColorBrush(palette.Hover);
+        _borderBrush = new SolidColorBrush(palette.Border);
+        _textBrush = new SolidColorBrush(palette.Text);
+        _mutedBrush = new SolidColorBrush(palette.Muted);
+
+        FontFamily = palette.Typeface;
 
         WindowStyle = WindowStyle.None;
         AllowsTransparency = true;
@@ -52,8 +63,8 @@ internal sealed class ThemeEditorWindow : Window
         body.Children.Add(new TextBlock
         {
             Text = "改动即时生效。颜色写 #AARRGGBB，或点右侧色块从色板里挑。",
-            FontSize = 11.5,
-            Foreground = new SolidColorBrush(Color.FromArgb(0xB0, 0xFF, 0xFF, 0xFF)),
+            FontSize = _palette.FontSizeSmall,
+            Foreground = _mutedBrush,
             Margin = new Thickness(0, 2, 0, 14),
         });
 
@@ -62,10 +73,10 @@ internal sealed class ThemeEditorWindow : Window
         AddColorRow("文字色", () => App.Settings.CustomText, v => App.Settings.CustomText = v);
         AddColorRow("鼠标悬浮高亮色", () => App.Settings.CustomHover, v => App.Settings.CustomHover = v);
         AddColorRow("活动高亮色", () => App.Settings.CustomActive, v => App.Settings.CustomActive = v);
-        AddColorRow("高亮文字反色", () => App.Settings.CustomActiveText, v => App.Settings.CustomActiveText = v);
+        // 「高亮文字反色」不再是一项设置：ThemePalette.OnColor 按高亮色的明暗自动给出黑/白
 
         AddSliderRow("边框线宽", 0, 8, 0.5, () => App.Settings.CustomBorderThickness, v => App.Settings.CustomBorderThickness = v, "px");
-        AddSliderRow("悬浮栏尺寸", 100, 300, 10, () => App.Settings.Scale * 100, v => App.Settings.Scale = v / 100.0, "%");
+        AddSliderRow("界面尺寸", 100, 300, 10, () => App.Settings.Scale * 100, v => App.Settings.Scale = v / 100.0, "%");
         AddFontRow();
 
         body.Children.Add(_rows);
@@ -74,9 +85,9 @@ internal sealed class ThemeEditorWindow : Window
         var shell = new Border
         {
             CornerRadius = new CornerRadius(12),
-            Background = new SolidColorBrush(BackgroundColor),
+            Background = _panelBrush,
             BorderThickness = new Thickness(1),
-            BorderBrush = new SolidColorBrush(BorderColor),
+            BorderBrush = _borderBrush,
             Child = body,
             Effect = new DropShadowEffect
             {
@@ -103,9 +114,9 @@ internal sealed class ThemeEditorWindow : Window
         var title = new TextBlock
         {
             Text = "自定义主题",
-            FontSize = 15,
+            FontSize = _palette.FontSizeHeadline,
             FontWeight = FontWeights.SemiBold,
-            Foreground = new SolidColorBrush(TextColor),
+            Foreground = _textBrush,
             VerticalAlignment = VerticalAlignment.Center,
         };
 
@@ -165,7 +176,7 @@ internal sealed class ThemeEditorWindow : Window
             Height = 24,
             CornerRadius = new CornerRadius(5),
             BorderThickness = new Thickness(1),
-            BorderBrush = new SolidColorBrush(BorderColor),
+            BorderBrush = _borderBrush,
             Margin = new Thickness(8, 0, 0, 0),
             Cursor = Cursors.Hand,
             Background = ParseBrush(getter()),
@@ -205,7 +216,7 @@ internal sealed class ThemeEditorWindow : Window
                 Margin = new Thickness(3),
                 CornerRadius = new CornerRadius(5),
                 BorderThickness = new Thickness(1),
-                BorderBrush = new SolidColorBrush(BorderColor),
+                BorderBrush = _borderBrush,
                 Background = ParseBrush(hex),
                 Cursor = Cursors.Hand,
                 ToolTip = hex,
@@ -225,9 +236,9 @@ internal sealed class ThemeEditorWindow : Window
         popup.Child = new Border
         {
             CornerRadius = new CornerRadius(10),
-            Background = new SolidColorBrush(RowColor),
+            Background = _rowBrush,
             BorderThickness = new Thickness(1),
-            BorderBrush = new SolidColorBrush(BorderColor),
+            BorderBrush = _borderBrush,
             Margin = new Thickness(10),
             Effect = new DropShadowEffect { BlurRadius = 16, ShadowDepth = 2, Direction = 270, Opacity = 0.5, Color = Colors.Black, RenderingBias = RenderingBias.Performance },
             Child = palettePanel,
@@ -254,7 +265,7 @@ internal sealed class ThemeEditorWindow : Window
             Width = 54,
             VerticalAlignment = VerticalAlignment.Center,
             TextAlignment = TextAlignment.Right,
-            Foreground = new SolidColorBrush(TextColor),
+            Foreground = _textBrush,
         };
 
         var slider = new Slider
@@ -321,7 +332,7 @@ internal sealed class ThemeEditorWindow : Window
         _rows.Children.Add(grid);
     }
 
-    private static Grid NewRow(string label)
+    private Grid NewRow(string label)
     {
         var grid = new Grid { Margin = new Thickness(0, 0, 0, 10), Background = Brushes.Transparent };
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
@@ -331,8 +342,8 @@ internal sealed class ThemeEditorWindow : Window
         {
             Text = label,
             VerticalAlignment = VerticalAlignment.Center,
-            FontSize = 12.5,
-            Foreground = new SolidColorBrush(TextColor),
+            FontSize = _palette.FontSizeBody,
+            Foreground = _textBrush,
         };
 
         Grid.SetColumn(text, 0);
@@ -340,89 +351,6 @@ internal sealed class ThemeEditorWindow : Window
         return grid;
     }
 
-    // ---------- 深色控件样式 ----------
-
-    private static Style DarkTextBoxStyle()
-    {
-        var style = new Style(typeof(TextBox));
-        style.Setters.Add(new Setter(Control.ForegroundProperty, new SolidColorBrush(TextColor)));
-        style.Setters.Add(new Setter(TextBox.CaretBrushProperty, new SolidColorBrush(TextColor)));
-        style.Setters.Add(new Setter(Control.FontSizeProperty, 12.0));
-        style.Setters.Add(new Setter(Control.TemplateProperty, (ControlTemplate)XamlReader.Parse(@"
-<ControlTemplate xmlns=""http://schemas.microsoft.com/winfx/2006/xaml/presentation""
-                 xmlns:x=""http://schemas.microsoft.com/winfx/2006/xaml"" TargetType=""TextBox"">
-  <Border x:Name=""Bd"" CornerRadius=""6"" Background=""#FF2A2A30"" BorderBrush=""#FF3A3A42"" BorderThickness=""1"">
-    <ScrollViewer x:Name=""PART_ContentHost"" Margin=""8,5,8,5"" VerticalAlignment=""Center""/>
-  </Border>
-  <ControlTemplate.Triggers>
-    <Trigger Property=""IsKeyboardFocused"" Value=""True"">
-      <Setter TargetName=""Bd"" Property=""BorderBrush"" Value=""#FF4C8DF6""/>
-    </Trigger>
-  </ControlTemplate.Triggers>
-</ControlTemplate>")));
-        return style;
-    }
-
-    private static Style DarkSliderStyle()
-    {
-        var style = new Style(typeof(Slider));
-        style.Setters.Add(new Setter(Control.TemplateProperty, (ControlTemplate)XamlReader.Parse(@"
-<ControlTemplate xmlns=""http://schemas.microsoft.com/winfx/2006/xaml/presentation""
-                 xmlns:x=""http://schemas.microsoft.com/winfx/2006/xaml"" TargetType=""Slider"">
-  <Grid VerticalAlignment=""Center"" Height=""22"">
-    <Border Height=""4"" CornerRadius=""2"" Background=""#FF3A3A42"" VerticalAlignment=""Center""/>
-    <Track x:Name=""PART_Track"">
-      <Track.DecreaseRepeatButton>
-        <RepeatButton Command=""Slider.DecreaseLarge"" Style=""{x:Null}"" Opacity=""0"" Width=""0""/>
-      </Track.DecreaseRepeatButton>
-      <Track.IncreaseRepeatButton>
-        <RepeatButton Command=""Slider.IncreaseLarge"" Opacity=""0""/>
-      </Track.IncreaseRepeatButton>
-      <Track.Thumb>
-        <Thumb Width=""14"" Height=""14"" Cursor=""Hand"">
-          <Thumb.Template>
-            <ControlTemplate TargetType=""Thumb"">
-              <Border CornerRadius=""7"" Background=""#FF4C8DF6"" BorderBrush=""#FFFFFFFF"" BorderThickness=""1""/>
-            </ControlTemplate>
-          </Thumb.Template>
-        </Thumb>
-      </Track.Thumb>
-    </Track>
-  </Grid>
-</ControlTemplate>")));
-        return style;
-    }
-
-    private static Style FlatButtonStyle(bool accent = false)
-    {
-        var style = new Style(typeof(Button));
-        style.Setters.Add(new Setter(Control.ForegroundProperty, Brushes.White));
-        style.Setters.Add(new Setter(Control.FontSizeProperty, 12.0));
-        style.Setters.Add(new Setter(Control.CursorProperty, Cursors.Hand));
-
-        var template = accent
-            ? @"<ControlTemplate xmlns=""http://schemas.microsoft.com/winfx/2006/xaml/presentation"" TargetType=""Button"">
-  <Border x:Name=""Bd"" CornerRadius=""6"" Background=""#FF4C8DF6"" Padding=""{TemplateBinding Padding}"">
-    <ContentPresenter HorizontalAlignment=""Center"" VerticalAlignment=""Center""/>
-  </Border>
-  <ControlTemplate.Triggers>
-    <Trigger Property=""IsMouseOver"" Value=""True""><Setter TargetName=""Bd"" Property=""Background"" Value=""#FF659BF8""/></Trigger>
-    <Trigger Property=""IsPressed"" Value=""True""><Setter TargetName=""Bd"" Property=""Background"" Value=""#FF3A7BE0""/></Trigger>
-  </ControlTemplate.Triggers>
-</ControlTemplate>"
-            : @"<ControlTemplate xmlns=""http://schemas.microsoft.com/winfx/2006/xaml/presentation"" TargetType=""Button"">
-  <Border x:Name=""Bd"" CornerRadius=""6"" Background=""#FF2A2A30"" BorderBrush=""#FF3A3A42"" BorderThickness=""1"" Padding=""{TemplateBinding Padding}"">
-    <ContentPresenter HorizontalAlignment=""Center"" VerticalAlignment=""Center""/>
-  </Border>
-  <ControlTemplate.Triggers>
-    <Trigger Property=""IsMouseOver"" Value=""True""><Setter TargetName=""Bd"" Property=""Background"" Value=""#FF35353D""/></Trigger>
-    <Trigger Property=""IsPressed"" Value=""True""><Setter TargetName=""Bd"" Property=""Background"" Value=""#FF202025""/></Trigger>
-  </ControlTemplate.Triggers>
-</ControlTemplate>";
-
-        style.Setters.Add(new Setter(Control.TemplateProperty, (ControlTemplate)XamlReader.Parse(template)));
-        return style;
-    }
 
     private void ResetToDefaults()
     {

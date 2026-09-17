@@ -51,9 +51,9 @@ public sealed class TrayIconManager : IDisposable
             ShowCheckMargin = true,
             ShowImageMargin = false,
             Renderer = new DarkMenuRenderer(),
-            BackColor = Color.FromArgb(27, 27, 31),
-            ForeColor = Color.FromArgb(242, 242, 242),
-            Font = new Font("Microsoft YaHei UI", 9f),
+            BackColor = DarkMenuColorTable.Background,
+            ForeColor = DarkMenuColorTable.Convert(ThemePalette.Resolve().Text, true),
+            Font = new Font(ThemePalette.Resolve().FontFamily, 9f),
         };
         _menu.Items.Add(_showDockItem);
         _menu.Items.Add(new ToolStripSeparator());
@@ -110,9 +110,11 @@ public sealed class TrayIconManager : IDisposable
     /// <summary>托盘菜单同样保持深色：切回系统默认会变成白底，与整体割裂。</summary>
     public void ApplyTheme()
     {
+        var palette = ThemePalette.Resolve();
         _menu.Renderer = new DarkMenuRenderer();
-        _menu.BackColor = Color.FromArgb(27, 27, 31);
-        _menu.ForeColor = Color.FromArgb(242, 242, 242);
+        _menu.BackColor = DarkMenuColorTable.Convert(palette.Background, true);
+        _menu.ForeColor = DarkMenuColorTable.Convert(palette.Text, true);
+        _menu.Font = new Font(palette.FontFamily, 9f);
     }
 
     private void RefreshChecks()
@@ -154,12 +156,20 @@ public sealed class TrayIconManager : IDisposable
     }
 }
 
-/// <summary>托盘菜单的深色配色，跟悬浮栏保持一致。</summary>
+/// <summary>托盘菜单的配色 —— 从 ThemePalette 现取，和悬浮栏/WPF 菜单同一份定义。</summary>
 internal sealed class DarkMenuColorTable : ProfessionalColorTable
 {
-    internal static readonly Color Background = Color.FromArgb(0xFF, 0x1B, 0x1B, 0x1F);
-    internal static readonly Color Hover = Color.FromArgb(0xFF, 0x3A, 0x3A, 0x42);
-    private static readonly Color Line = Color.FromArgb(0x2E, 0xFF, 0xFF, 0xFF);
+    private static ThemePalette Palette => ThemePalette.Resolve();
+
+    /// <summary>WinForms 的颜色类型和 WPF 不一样，这里做一次转换。</summary>
+    internal static Color Convert(System.Windows.Media.Color color, bool opaque = false)
+        => opaque ? Color.FromArgb(0xFF, color.R, color.G, color.B) : Color.FromArgb(color.A, color.R, color.G, color.B);
+
+    internal static Color Background => Convert(Palette.Background, true);
+
+    internal static Color Hover => Convert(Palette.Active, true);
+
+    private static Color Line => Convert(Palette.Separator, true);
 
     // 注：ProfessionalColorTable.UseSystemColors 不是 virtual，改不了；
     // 选中色由 DarkMenuRenderer.OnRenderMenuItemBackground 自绘保证
@@ -168,7 +178,7 @@ internal sealed class DarkMenuColorTable : ProfessionalColorTable
     public override Color ImageMarginGradientBegin => Background;
     public override Color ImageMarginGradientMiddle => Background;
     public override Color ImageMarginGradientEnd => Background;
-    public override Color MenuBorder => Color.FromArgb(0x33, 0xFF, 0xFF, 0xFF);
+    public override Color MenuBorder => Convert(Palette.Border, true);
     public override Color MenuItemBorder => Color.Transparent;
     public override Color MenuItemSelected => Hover;
     public override Color MenuItemSelectedGradientBegin => Hover;
@@ -191,9 +201,10 @@ internal sealed class DarkMenuRenderer : ToolStripProfessionalRenderer
 
     protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
     {
+        var palette = ThemePalette.Resolve();
         e.TextColor = e.Item.Enabled
-            ? Color.FromArgb(242, 242, 242)
-            : Color.FromArgb(110, 242, 242, 242);
+            ? DarkMenuColorTable.Convert(palette.Text, true)
+            : DarkMenuColorTable.Convert(palette.Muted, true);
         base.OnRenderItemText(e);
     }
 
@@ -220,7 +231,7 @@ internal sealed class DarkMenuRenderer : ToolStripProfessionalRenderer
         float x = bounds.Left + 4f;
         float y = bounds.Top + (bounds.Height / 2f);
 
-        using var pen = new Pen(Color.FromArgb(245, 245, 245), 2f)
+        using var pen = new Pen(DarkMenuColorTable.Convert(ThemePalette.Resolve().Text, true), 2f)
         {
             StartCap = LineCap.Round,
             EndCap = LineCap.Round,

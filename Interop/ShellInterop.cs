@@ -119,6 +119,59 @@ internal static class ShellInterop
         return icon;
     }
 
+    /// <summary>
+    /// 取某个窗口的图标，给 Alt+Tab 卡片的标题栏用。
+    /// 顺序照抄系统的做法：WM_GETICON(大) → WM_GETICON(小) → 窗口类的图标 → 宿主 exe 的图标。
+    /// 拿到的句柄都是共享资源，除了自己从 shell 取的那一个，其余一律不销毁。
+    /// </summary>
+    public static ImageSource? GetWindowIcon(IntPtr hwnd)
+    {
+        try
+        {
+            foreach (var kind in new[] { NativeMethods.ICON_BIG, NativeMethods.ICON_SMALL2, NativeMethods.ICON_SMALL })
+            {
+                var handle = NativeMethods.QueryWindowIcon(hwnd, kind);
+                if (handle == IntPtr.Zero) continue;
+
+                var source = FromHIcon(handle);
+                if (source is not null) return source;
+            }
+
+            foreach (var index in new[] { NativeMethods.GCLP_HICON, NativeMethods.GCLP_HICONSM })
+            {
+                var handle = new IntPtr(NativeMethods.GetWindowLongPtr(hwnd, index));
+                if (handle == IntPtr.Zero) continue;
+
+                var source = FromHIcon(handle);
+                if (source is not null) return source;
+            }
+        }
+        catch
+        {
+            // 落到 exe 图标
+        }
+
+        try
+        {
+            NativeMethods.GetWindowThreadProcessId(hwnd, out uint pid);
+            var path = System.Diagnostics.Process.GetProcessById((int)pid).MainModule?.FileName;
+            if (!string.IsNullOrWhiteSpace(path))
+            {
+                var info = new SHFILEINFO();
+                SHGetFileInfo(path!, 0, ref info, (uint)Marshal.SizeOf<SHFILEINFO>(), SHGFI_ICON | SHGFI_LARGEICON);
+                var source = FromHIcon(info.hIcon);
+                if (info.hIcon != IntPtr.Zero) DestroyIcon(info.hIcon);
+                if (source is not null) return source;
+            }
+        }
+        catch
+        {
+            // 进程可能已经退出
+        }
+
+        return null;
+    }
+
     private static ImageSource? BuildIcon(string? path)
     {
         // 首选 shell 的 jumbo(256px) 图像列表：按显示尺寸缩下去最清晰，高 DPI 下也不糊

@@ -4,6 +4,7 @@ using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Effects;
 using ExplorerDock.Interop;
+using ExplorerDock.Services;
 
 namespace ExplorerDock;
 
@@ -31,19 +32,22 @@ internal sealed class ShadowWindow : Window
         IsHitTestVisible = false;
         Focusable = false;
 
+        // 兜底外观也走 ThemePalette，不再是写死的 #1B1B1F
+        var palette = ThemePalette.Resolve();
+
         _shape = new Border
         {
-            Background = new SolidColorBrush(Color.FromArgb(0xFF, 0x1B, 0x1B, 0x1F)),
-            BorderBrush = new SolidColorBrush(Color.FromArgb(0xFF, 0x1B, 0x1B, 0x1F)),
+            Background = new SolidColorBrush(palette.Background),
+            BorderBrush = new SolidColorBrush(palette.Background),
             BorderThickness = new Thickness(2),
-            CornerRadius = new CornerRadius(9),
+            CornerRadius = new CornerRadius(palette.CornerRadius),
             Margin = new Thickness(ShadowMargin),
             Effect = new DropShadowEffect
             {
-                BlurRadius = 20,
-                ShadowDepth = 3,
+                BlurRadius = palette.ShadowBlur,
+                ShadowDepth = palette.ShadowDepth,
                 Direction = 270,
-                Opacity = 0.55,
+                Opacity = palette.ShadowOpacity,
                 Color = Colors.Black,
                 RenderingBias = RenderingBias.Performance,
             },
@@ -63,9 +67,11 @@ internal sealed class ShadowWindow : Window
 
         if (_shape.Effect is DropShadowEffect shadow)
         {
-            shadow.Opacity = light ? 0.50 : 0.62;
-            shadow.BlurRadius = light ? 22 : 20;
-            shadow.ShadowDepth = light ? 5 : 4;
+            // 阴影参数同样以主题为基准，浅色下略强一点（白底上阴影要更明显才看得出层次）
+            var palette = ThemePalette.Resolve();
+            shadow.Opacity = Math.Min(0.95, palette.ShadowOpacity + (light ? 0.05 : 0.07));
+            shadow.BlurRadius = palette.ShadowBlur + (light ? 2 : 0);
+            shadow.ShadowDepth = palette.ShadowDepth + (light ? 1 : 0);
         }
     }
 
