@@ -362,16 +362,24 @@ internal sealed class AltTabController : IDisposable
     private void StopThumbnails() => _thumbnailHost?.Hide();
 
     /// <summary>
-    /// 缩略图留边处的底色：把半透明的"缩略图底色"合成到卡片底色上，
-    /// 这样等比缩放留下的边条跟卡片本身一个色，不会出现突兀的方块。
+    /// 缩略图留边处的底色。
+    ///
+    /// 宿主窗口是不透明的 Win32 窗口（DWM 缩略图不接受分层窗口），所以这里得自己算合成结果：
+    /// 面板底色（不透明化）→ 叠上卡片底色 Chip → 再叠上缩略图自己的底色。
     /// </summary>
     private static System.Windows.Media.Color ThumbnailBackground()
     {
         var palette = ThemePalette.Resolve();
 
-        System.Windows.Media.Color top = palette.ThumbBack;
-        System.Windows.Media.Color bottom = palette.Hover;
+        var surface = System.Windows.Media.Color.FromRgb(
+            palette.Background.R, palette.Background.G, palette.Background.B);
 
+        return Over(palette.ThumbBack, Over(palette.Chip, surface));
+    }
+
+    /// <summary>把半透明的 top 叠在不透明底色 bottom 上。</summary>
+    private static System.Windows.Media.Color Over(System.Windows.Media.Color top, System.Windows.Media.Color bottom)
+    {
         double alpha = top.A / 255.0;
 
         return System.Windows.Media.Color.FromRgb(

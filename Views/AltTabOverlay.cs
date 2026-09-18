@@ -332,7 +332,11 @@ internal sealed class AltTabOverlay : Window
         _panel.CornerRadius = new CornerRadius(palette.CornerRadius);
         _panel.Background = NewBrush(palette.SurfaceAlpha, palette.Background.R, palette.Background.G, palette.Background.B);
         _panel.BorderBrush = NewBrush(palette.Border.A, palette.Border.R, palette.Border.G, palette.Border.B);
-        _cardNormal = NewBrush(palette.Hover.A, palette.Hover.R, palette.Hover.G, palette.Hover.B);
+        // 卡片底色用 Chip（半透明块，叠在面板底色上）：浅色主题下是浅灰、深色主题下是亮灰，
+        // 卡片和文字都跟着主题走。
+        // 原来用 Hover —— 那在浅色主题下是不透明的深灰 #555，于是整个面板的卡片全是一块块黑的，
+        // 跟悬浮栏/剪贴板那套完全不搭。
+        _cardNormal = NewBrush(palette.Chip.A, palette.Chip.R, palette.Chip.G, palette.Chip.B);
         _cardSelected = NewBrush(palette.Active.A, palette.Active.R, palette.Active.G, palette.Active.B);
         _accentBrush = NewBrush(palette.Accent.A, palette.Accent.R, palette.Accent.G, palette.Accent.B);
         _textBrush = NewBrush(palette.Text.A, palette.Text.R, palette.Text.G, palette.Text.B);
