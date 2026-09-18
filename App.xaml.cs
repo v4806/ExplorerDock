@@ -307,7 +307,8 @@ public partial class App : Application
         _windowHost.SnapshotUpdated += OnSnapshotUpdated;
         _windowHost.Start();
 
-        _tray = new TrayIconManager(this);
+        // 托盘图标挂在悬浮栏窗口上（用 Shell_NotifyIcon，不再依赖 WinForms）
+        if (Dock is not null) _tray = new TrayIconManager(this, Dock);
 
         // Alt+Tab 接管：钩子挂上之后就由我们自己画切换面板
         _altTab = new AltTabController(this);
