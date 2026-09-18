@@ -24,15 +24,10 @@ internal sealed class AltTabOverlay : Window
     private const double CardGap = 12;
     private const int MaxPerRow = 5;
     private const double PanelPadding = 20;
-    private const double PanelBorder = 1;
-
-    /// <summary>抓缩略图的目标宽度（像素）。</summary>
-    public const int ThumbnailWidth = 560;
 
     private readonly Border _panel;
     private readonly WrapPanel _wrap;
     private readonly List<CardVisual> _cards = new();
-    private readonly Dictionary<IntPtr, CardVisual> _byHandle = new();
 
     private ThemePalette _palette = ThemePalette.Resolve();
     private int _selected = -1;
@@ -44,7 +39,7 @@ internal sealed class AltTabOverlay : Window
     private bool _cursorArmed;
     private Brush _cardNormal = Brushes.Transparent;
     private Brush _cardSelected = Brushes.Transparent;
-    private Brush _accentBrush = Brushes.Transparent;
+    private Brush _selectedBorderBrush = Brushes.Transparent;
     private Brush _textBrush = Brushes.White;
     private Brush _onActiveTextBrush = Brushes.White;
     private Brush _thumbBack = Brushes.Transparent;
@@ -72,7 +67,7 @@ internal sealed class AltTabOverlay : Window
         _panel = new Border
         {
             CornerRadius = new CornerRadius(_palette.CornerRadius),
-            BorderThickness = new Thickness(PanelBorder),
+            BorderThickness = new Thickness(_palette.Custom ? _palette.CustomBorderThickness : _palette.DockBorderThickness),
             Padding = new Thickness(PanelPadding),
             Child = _wrap,
             Effect = new DropShadowEffect
@@ -124,8 +119,11 @@ internal sealed class AltTabOverlay : Window
         int columns = Math.Clamp(items.Count, 1, MaxPerRow);
         int rows = Math.Max(1, (int)Math.Ceiling(items.Count / (double)columns));
 
-        double panelWidth = columns * (CardWidth + CardGap) + PanelPadding * 2 + PanelBorder * 2;
-        double panelHeight = rows * (CardHeight + CardGap) + PanelPadding * 2 + PanelBorder * 2;
+        // 外框粗细跟悬浮栏/剪贴板面板一致，尺寸里也要按实际值预留，否则面板会差几个像素
+        double border = _palette.Custom ? _palette.CustomBorderThickness : _palette.DockBorderThickness;
+
+        double panelWidth = columns * (CardWidth + CardGap) + PanelPadding * 2 + border * 2;
+        double panelHeight = rows * (CardHeight + CardGap) + PanelPadding * 2 + border * 2;
 
         var area = SystemParameters.WorkArea;
         double maxHeight = area.Height * 0.78;
@@ -159,7 +157,7 @@ internal sealed class AltTabOverlay : Window
 
         for (int i = 0; i < _cards.Count; i++)
         {
-            _cards[i].Apply(_cardNormal, _cardSelected, _accentBrush, _textBrush, _onActiveTextBrush, _thumbBack, i == index);
+            _cards[i].Apply(_cardNormal, _cardSelected, _selectedBorderBrush, _textBrush, _onActiveTextBrush, _thumbBack, i == index);
         }
     }
 
@@ -225,13 +223,11 @@ internal sealed class AltTabOverlay : Window
     {
         _wrap.Children.Clear();
         _cards.Clear();
-        _byHandle.Clear();
 
         for (int i = 0; i < items.Count; i++)
         {
             var card = CreateCard(items[i], i);
             _cards.Add(card);
-            _byHandle[items[i].Handle] = card;
             _wrap.Children.Add(card.Root);
         }
     }
@@ -320,7 +316,7 @@ internal sealed class AltTabOverlay : Window
             e.Handled = true;
         };
 
-        return new CardVisual(info.Handle, root, fallback, title, thumbHost);
+        return new CardVisual(info.Handle, root, title, thumbHost);
     }
 
     private void ApplyTone()
@@ -330,6 +326,9 @@ internal sealed class AltTabOverlay : Window
         FontFamily = palette.Typeface;
 
         _panel.CornerRadius = new CornerRadius(palette.CornerRadius);
+
+        // 面板外框跟悬浮栏、剪贴板面板用同一套参数（自定义主题走自定义粗细，否则走 DockBorderThickness）
+        _panel.BorderThickness = new Thickness(palette.Custom ? palette.CustomBorderThickness : palette.DockBorderThickness);
         _panel.Background = NewBrush(palette.SurfaceAlpha, palette.Background.R, palette.Background.G, palette.Background.B);
         _panel.BorderBrush = NewBrush(palette.Border.A, palette.Border.R, palette.Border.G, palette.Border.B);
         // 卡片底色用 Chip（半透明块，叠在面板底色上）：浅色主题下是浅灰、深色主题下是亮灰，
@@ -338,7 +337,8 @@ internal sealed class AltTabOverlay : Window
         // 跟悬浮栏/剪贴板那套完全不搭。
         _cardNormal = NewBrush(palette.Chip.A, palette.Chip.R, palette.Chip.G, palette.Chip.B);
         _cardSelected = NewBrush(palette.Active.A, palette.Active.R, palette.Active.G, palette.Active.B);
-        _accentBrush = NewBrush(palette.Accent.A, palette.Accent.R, palette.Accent.G, palette.Accent.B);
+        // 选中卡的描边跟剪贴板面板一致：主题描边色（自定义主题下不描边），不再用独立的高亮蓝
+        _selectedBorderBrush = palette.Custom ? Brushes.Transparent : NewBrush(palette.Border.A, palette.Border.R, palette.Border.G, palette.Border.B);
         _textBrush = NewBrush(palette.Text.A, palette.Text.R, palette.Text.G, palette.Text.B);
         _onActiveTextBrush = NewBrush(palette.ActiveText.A, palette.ActiveText.R, palette.ActiveText.G, palette.ActiveText.B);
         _thumbBack = NewBrush(palette.ThumbBack.A, palette.ThumbBack.R, palette.ThumbBack.G, palette.ThumbBack.B);
@@ -346,7 +346,7 @@ internal sealed class AltTabOverlay : Window
 
         for (int i = 0; i < _cards.Count; i++)
         {
-            _cards[i].Apply(_cardNormal, _cardSelected, _accentBrush, _textBrush, _onActiveTextBrush, _thumbBack, i == _selected);
+            _cards[i].Apply(_cardNormal, _cardSelected, _selectedBorderBrush, _textBrush, _onActiveTextBrush, _thumbBack, i == _selected);
         }
     }
 
@@ -354,15 +354,13 @@ internal sealed class AltTabOverlay : Window
 
     private sealed class CardVisual
     {
-        private readonly Image _fallback;
         private readonly TextBlock _title;
         private readonly Grid _thumbHost;
 
-        public CardVisual(IntPtr handle, Border root, Image fallback, TextBlock title, Grid thumbHost)
+        public CardVisual(IntPtr handle, Border root, TextBlock title, Grid thumbHost)
         {
             Handle = handle;
             Root = root;
-            _fallback = fallback;
             _title = title;
             _thumbHost = thumbHost;
         }
