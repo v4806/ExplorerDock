@@ -657,4 +657,131 @@ internal static class NativeMethods
     {
         try { ReleaseCapture(); } catch { }
     }
+
+    // ---------- DWM 实时缩略图（任务栏预览用的就是这套） ----------
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct DWM_THUMBNAIL_PROPERTIES
+    {
+        public uint dwFlags;
+        public RECT rcDestination;
+        public RECT rcSource;
+        public byte opacity;
+
+        [MarshalAs(UnmanagedType.Bool)] public bool fVisible;
+        [MarshalAs(UnmanagedType.Bool)] public bool fSourceClientAreaOnly;
+    }
+
+    public const uint DWM_TNP_RECTDESTINATION = 0x00000001;
+    public const uint DWM_TNP_OPACITY = 0x00000004;
+    public const uint DWM_TNP_VISIBLE = 0x00000008;
+    public const uint DWM_TNP_SOURCECLIENTAREAONLY = 0x00000010;
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmRegisterThumbnail(IntPtr hwndDestination, IntPtr hwndSource, out IntPtr phThumbnailId);
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmUnregisterThumbnail(IntPtr hThumbnailId);
+
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmUpdateThumbnailProperties(IntPtr hThumbnailId, ref DWM_THUMBNAIL_PROPERTIES ptnProperties);
+
+    /// <summary>把一个窗口的实时缩略图挂到宿主窗口上（源窗口最小化也能显示内容）。</summary>
+    public static bool RegisterThumbnail(IntPtr destination, IntPtr source, out IntPtr thumbnailId)
+    {
+        thumbnailId = IntPtr.Zero;
+
+        try { return DwmRegisterThumbnail(destination, source, out thumbnailId) == 0; }
+        catch { return false; }
+    }
+
+    public static void UnregisterThumbnail(IntPtr thumbnailId)
+    {
+        if (thumbnailId == IntPtr.Zero) return;
+
+        try { DwmUnregisterThumbnail(thumbnailId); } catch { }
+    }
+
+    public static bool UpdateThumbnail(IntPtr thumbnailId, ref DWM_THUMBNAIL_PROPERTIES properties)
+    {
+        if (thumbnailId == IntPtr.Zero) return false;
+
+        try { return DwmUpdateThumbnailProperties(thumbnailId, ref properties) == 0; }
+        catch { return false; }
+    }
+
+    // ---------- 窗口区域（把宿主窗口裁成只剩缩略图那几块） ----------
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern int SetWindowRgn(IntPtr hWnd, IntPtr hRgn, bool bRedraw);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetClientRect(IntPtr hWnd, out RECT lpRect);
+
+    /// <summary>窗口客户区尺寸（拿不到返回 false）。</summary>
+    public static bool GetClientSize(IntPtr hwnd, out int width, out int height)
+    {
+        width = 0;
+        height = 0;
+
+        try
+        {
+            if (!GetClientRect(hwnd, out var rect)) return false;
+
+            width = rect.Right - rect.Left;
+            height = rect.Bottom - rect.Top;
+
+            return width > 0 && height > 0;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    [DllImport("gdi32.dll")]
+    private static extern IntPtr CreateRectRgn(int nLeftRect, int nTopRect, int nRightRect, int nBottomRect);
+
+    [DllImport("gdi32.dll")]
+    private static extern int CombineRgn(IntPtr hrgnDest, IntPtr hrgnSrc1, IntPtr hrgnSrc2, int fnCombineMode);
+
+    [DllImport("gdi32.dll")]
+    private static extern bool DeleteObject(IntPtr hObject);
+
+    private const int RGN_OR = 2;
+
+    /// <summary>
+    /// 把窗口裁剪成"只剩这几个矩形"（坐标是窗口客户区坐标）。
+    /// 传空列表就把窗口整个裁掉（等于看不见）。区域交给系统接管，不要再删。
+    /// </summary>
+    public static void SetWindowRegion(IntPtr hwnd, IReadOnlyList<RECT> rects)
+    {
+        if (hwnd == IntPtr.Zero) return;
+
+        try
+        {
+            if (rects.Count == 0)
+            {
+                SetWindowRgn(hwnd, CreateRectRgn(0, 0, 0, 0), true);
+                return;
+            }
+
+            var region = CreateRectRgn(
+                rects[0].Left, rects[0].Top, rects[0].Right, rects[0].Bottom);
+
+            for (int i = 1; i < rects.Count; i++)
+            {
+                var piece = CreateRectRgn(rects[i].Left, rects[i].Top, rects[i].Right, rects[i].Bottom);
+                CombineRgn(region, region, piece, RGN_OR);
+                DeleteObject(piece);
+            }
+
+            // SetWindowRgn 成功的话区域归系统所有，这里不能再删
+            SetWindowRgn(hwnd, region, true);
+        }
+        catch
+        {
+            // 裁剪失败就退化成整窗可见（视觉上多盖一块，但不影响用）
+        }
+    }
 }

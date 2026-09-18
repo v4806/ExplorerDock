@@ -30,8 +30,6 @@ internal sealed class AltTabController : IDisposable
     private bool _commitPending;
     private int _pendingTabs;
     private IntPtr _originForeground;
-    private Thread? _thumbnailThread;
-    private volatile bool _thumbStop;
 
     public AltTabController(App app)
     {
@@ -330,50 +328,56 @@ internal sealed class AltTabController : IDisposable
 
     // ---------- 缩略图 ----------
 
+    private AltTabThumbnailHost? _thumbnailHost;
+
+    /// <summary>
+    /// 面板显示之后，把每张卡对应的窗口缩略图挂上去。
+    ///
+    /// 走 DWM 的实时缩略图（DwmRegisterThumbnail，系统任务栏预览用的同一套），不再截图：
+    /// PrintWindow 对最小化的窗口只能拿到任务栏上那条 160×28 的小图、甚至全黑，
+    /// DWM 的缩略图则是实时渲染的，最小化的窗口照样有真实画面。
+    /// 注册一次就够，之后由 DWM 自己刷新。
+    /// </summary>
     private void StartThumbnails()
     {
-        StopThumbnails();
-        _thumbStop = false;
-
-        var items = _items;
-
-        var thread = new Thread(() =>
+        // 卡片位置要等布局算完，所以压到 Loaded 优先级再摆
+        _app.Dispatcher.BeginInvoke(new Action(() =>
         {
-            foreach (var item in items)
+            if (!_active || _overlay is null) return;
+
+            _thumbnailHost ??= new AltTabThumbnailHost();
+
+            var slots = _overlay.GetThumbnailSlots();
+
+            if (slots.Count == 0)
             {
-                if (_thumbStop) return;
-
-                var image = WindowThumbnail.Capture(item.Handle, AltTabOverlay.ThumbnailWidth);
-                if (image is null || _thumbStop) continue;
-
-                var handle = item.Handle;
-                try
-                {
-                    _app.Dispatcher.BeginInvoke(new Action(() =>
-                    {
-                        if (!_thumbStop) _overlay?.SetThumbnail(handle, image);
-                    }));
-                }
-                catch
-                {
-                    return;   // 程序在退出
-                }
+                _thumbnailHost.Hide();
+                return;
             }
-        })
-        {
-            IsBackground = true,
-            Name = "ExplorerDock.Thumbnails",
-            Priority = ThreadPriority.BelowNormal,
-        };
 
-        _thumbnailThread = thread;
-        thread.Start();
+            _thumbnailHost.Show(slots, ThumbnailBackground());
+        }), System.Windows.Threading.DispatcherPriority.Loaded);
     }
 
-    private void StopThumbnails()
+    private void StopThumbnails() => _thumbnailHost?.Hide();
+
+    /// <summary>
+    /// 缩略图留边处的底色：把半透明的"缩略图底色"合成到卡片底色上，
+    /// 这样等比缩放留下的边条跟卡片本身一个色，不会出现突兀的方块。
+    /// </summary>
+    private static System.Windows.Media.Color ThumbnailBackground()
     {
-        _thumbStop = true;
-        _thumbnailThread = null;
+        var palette = ThemePalette.Resolve();
+
+        System.Windows.Media.Color top = palette.ThumbBack;
+        System.Windows.Media.Color bottom = palette.Hover;
+
+        double alpha = top.A / 255.0;
+
+        return System.Windows.Media.Color.FromRgb(
+            (byte)Math.Round(top.R * alpha + bottom.R * (1 - alpha)),
+            (byte)Math.Round(top.G * alpha + bottom.G * (1 - alpha)),
+            (byte)Math.Round(top.B * alpha + bottom.B * (1 - alpha)));
     }
 
     // ---------- 工具 ----------
@@ -448,6 +452,16 @@ internal sealed class AltTabController : IDisposable
 
             StopThumbnails();
             _overlay?.Dismiss();
+        }
+        catch
+        {
+            // 忽略
+        }
+
+        try
+        {
+            _thumbnailHost?.Dispose();
+            _thumbnailHost = null;
         }
         catch
         {

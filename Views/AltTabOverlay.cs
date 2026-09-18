@@ -163,10 +163,43 @@ internal sealed class AltTabOverlay : Window
         }
     }
 
-    /// <summary>缩略图抓好了就换上去（在 UI 线程调用）。</summary>
-    public void SetThumbnail(IntPtr handle, ImageSource image)
+    /// <summary>
+    /// 每张卡的缩略图区域（屏幕物理像素）+ 对应的源窗口句柄，交给缩略图宿主去挂 DWM 缩略图。
+    /// 必须在面板已经显示、布局算完之后调用。
+    /// </summary>
+    public List<ThumbnailSlot> GetThumbnailSlots()
     {
-        if (_byHandle.TryGetValue(handle, out var card)) card.SetThumbnail(image);
+        var slots = new List<ThumbnailSlot>(_cards.Count);
+
+        foreach (var card in _cards)
+        {
+            if (card.Handle == IntPtr.Zero) continue;
+
+            var host = card.ThumbHost;
+
+            if (host.ActualWidth <= 2 || host.ActualHeight <= 2) continue;
+
+            try
+            {
+                var topLeft = host.PointToScreen(new Point(0, 0));
+                var bottomRight = host.PointToScreen(new Point(host.ActualWidth, host.ActualHeight));
+
+                int width = (int)Math.Round(bottomRight.X - topLeft.X);
+                int height = (int)Math.Round(bottomRight.Y - topLeft.Y);
+
+                if (width <= 2 || height <= 2) continue;
+
+                slots.Add(new ThumbnailSlot(
+                    card.Handle,
+                    new Int32Rect((int)Math.Round(topLeft.X), (int)Math.Round(topLeft.Y), width, height)));
+            }
+            catch
+            {
+                // 布局还没算完，这张先跳过
+            }
+        }
+
+        return slots;
     }
 
     public void Dismiss()
@@ -231,7 +264,7 @@ internal sealed class AltTabOverlay : Window
         header.Children.Add(icon);
         header.Children.Add(title);
 
-        // 没抓到缩略图时显示大图标（最小化/受保护窗口就是这么个待遇，和系统一致）
+        // 缩略图由 DWM 实时渲染后盖在这块区域上；拿不到缩略图的窗口就显示大图标
         var fallback = new Image
         {
             Source = info.Icon,
@@ -242,22 +275,12 @@ internal sealed class AltTabOverlay : Window
             VerticalAlignment = VerticalAlignment.Center,
         };
 
-        var thumbnail = new Image
-        {
-            Stretch = Stretch.Uniform,
-            StretchDirection = StretchDirection.DownOnly,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center,
-            Visibility = Visibility.Collapsed,
-        };
-
         var thumbHost = new Grid
         {
             Margin = new Thickness(9, 0, 9, 9),
             ClipToBounds = true,
         };
         thumbHost.Children.Add(fallback);
-        thumbHost.Children.Add(thumbnail);
 
         var layout = new Grid();
         layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -297,7 +320,7 @@ internal sealed class AltTabOverlay : Window
             e.Handled = true;
         };
 
-        return new CardVisual(root, thumbnail, fallback, title, thumbHost);
+        return new CardVisual(info.Handle, root, fallback, title, thumbHost);
     }
 
     private void ApplyTone()
@@ -327,21 +350,25 @@ internal sealed class AltTabOverlay : Window
 
     private sealed class CardVisual
     {
-        private readonly Image _thumbnail;
         private readonly Image _fallback;
         private readonly TextBlock _title;
         private readonly Grid _thumbHost;
 
-        public CardVisual(Border root, Image thumbnail, Image fallback, TextBlock title, Grid thumbHost)
+        public CardVisual(IntPtr handle, Border root, Image fallback, TextBlock title, Grid thumbHost)
         {
+            Handle = handle;
             Root = root;
-            _thumbnail = thumbnail;
             _fallback = fallback;
             _title = title;
             _thumbHost = thumbHost;
         }
 
+        public IntPtr Handle { get; }
+
         public Border Root { get; }
+
+        /// <summary>缩略图区域：DWM 的实时缩略图会盖在这块上（它是宿主窗口，压在面板上面）。</summary>
+        public FrameworkElement ThumbHost => _thumbHost;
 
         public void Apply(Brush normal, Brush selected, Brush accent, Brush text, Brush onSelectedText, Brush thumbBack, bool isSelected)
         {
@@ -349,13 +376,6 @@ internal sealed class AltTabOverlay : Window
             Root.BorderBrush = isSelected ? accent : Brushes.Transparent;
             _title.Foreground = isSelected ? onSelectedText : text;
             _thumbHost.Background = thumbBack;
-        }
-
-        public void SetThumbnail(ImageSource image)
-        {
-            _thumbnail.Source = image;
-            _thumbnail.Visibility = Visibility.Visible;
-            _fallback.Visibility = Visibility.Collapsed;
         }
     }
 }

@@ -13,7 +13,10 @@ namespace ExplorerDock.Interop;
 ///
 /// 用 PrintWindow + PW_RENDERFULLCONTENT：对 DWM 合成的窗口（资源管理器、浏览器、UWP）
 /// 也能拿到真实内容，而 BitBlt 抓不到被遮挡的窗口。
-/// 实测单个窗口 1–47ms，所以只在后台线程串行调用，抓到一张交一张。
+///
+/// 注意：Alt+Tab 面板现在改用 DWM 的实时缩略图（见 AltTabThumbnailHost），
+/// 因为 PrintWindow 对**最小化**的窗口只能拿到任务栏上那条 160×28 的小图、甚至全黑。
+/// 这个类暂时没人调用，留着当回退方案。
 /// </summary>
 internal static class WindowThumbnail
 {
