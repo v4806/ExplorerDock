@@ -55,6 +55,8 @@ internal sealed class HostRuntime : IDisposable
 
         AltTabController.Log($"host: keyboard installed={_host.KeyboardInstalled}");
 
+        StartWatchdog();
+
         while (!_stop.IsSet)
         {
             try
@@ -63,7 +65,9 @@ internal sealed class HostRuntime : IDisposable
             }
             catch
             {
-                // 界面进程断开、管道出错：退回去等下一次连接
+                // 界面进程断开、管道出错：退回去等下一次连接。
+                // 从没连上过也记一笔，交给看门狗收尾
+                if (!_uiConnected && _uiDisconnectedAt == DateTime.MinValue) _uiDisconnectedAt = DateTime.UtcNow;
             }
 
             Close();
@@ -74,6 +78,59 @@ internal sealed class HostRuntime : IDisposable
         }
 
         _host.Dispose();
+    }
+
+    /// <summary>界面进程断开多久还没回来，就认定它已经走了。</summary>
+    private const double HostIdleExitSeconds = 8;
+
+    /// <summary>界面进程当前是不是连着。</summary>
+    private volatile bool _uiConnected;
+
+    /// <summary>最后一次与界面断开的时间。</summary>
+    private DateTime _uiDisconnectedAt = DateTime.MinValue;
+
+    /// <summary>
+    /// "界面没了就收摊"的看门狗：界面进程被强杀 / 崩溃时，它没法再发退出命令，
+    /// 这里负责把被摘掉的任务栏按钮还回去，然后结束自己。
+    ///
+    /// 为什么另开线程：断开之后主循环会阻塞在"等下一次连接"上，计时根本推不动。
+    /// 不这么干的话，这个进程会一直赖着不走，还继续把任务栏按钮往掉摘 ——
+    /// 界面早没了、按钮也回不来，就是"僵尸进程"那个毛病。
+    /// </summary>
+    private void StartWatchdog()
+    {
+        var thread = new Thread(() =>
+        {
+            while (true)
+            {
+                Thread.Sleep(500);
+
+                if (_uiConnected) continue;
+
+                var since = _uiDisconnectedAt;
+                if (since == DateTime.MinValue) continue;
+                if ((DateTime.UtcNow - since).TotalSeconds < HostIdleExitSeconds) continue;
+
+                AltTabController.Log("host: ui gone, restoring taskbar buttons and exiting");
+
+                try
+                {
+                    _host.RestoreNow();
+                }
+                catch
+                {
+                    // 忽略
+                }
+
+                Environment.Exit(0);
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "ExplorerDock.HostWatchdog",
+        };
+
+        thread.Start();
     }
 
     /// <summary>启动 GUI 线程（幂等）。</summary>
@@ -169,6 +226,8 @@ internal sealed class HostRuntime : IDisposable
         client.Connect(3000);
 
         _stream = client;
+        _uiConnected = true;
+        _uiDisconnectedAt = DateTime.MinValue;
         AltTabController.Log("host: ui connected");
 
         while (!_stop.IsSet)
@@ -184,6 +243,8 @@ internal sealed class HostRuntime : IDisposable
             if (!RunOnGui(() => Handle(message), false)) break;
         }
 
+        _uiConnected = false;
+        _uiDisconnectedAt = DateTime.UtcNow;
         AltTabController.Log("host: ui disconnected");
     }
 

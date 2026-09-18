@@ -1576,6 +1576,17 @@ public partial class App : Application
             // 忽略
         }
 
+        // 退出时重启一次文件资源管理器：任务栏会重建，被摘掉的窗口按钮自然就回来了。
+        // 比一个个把按钮 AddTab 回去可靠 —— 不用记谁被摘过，也不会把早关掉的窗口还回来。
+        try
+        {
+            RestartExplorer();
+        }
+        catch
+        {
+            // 忽略
+        }
+
         try
         {
             _tray?.Dispose();

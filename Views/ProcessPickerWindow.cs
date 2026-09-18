@@ -91,11 +91,11 @@ internal sealed class ProcessPickerWindow : Window
         ResizeMode = ResizeMode.NoResize;
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
         Width = 560;
-        Height = 620;
+        Height = 560;
         Title = "ExplorerDock";
         FontFamily = palette.Typeface;
 
-        var root = new StackPanel { Margin = new Thickness(24, 22, 24, 18) };
+        var root = new StackPanel { Margin = new Thickness(20, 16, 20, 14) };
 
         root.Children.Add(new TextBlock
         {
@@ -110,8 +110,8 @@ internal sealed class ProcessPickerWindow : Window
             Text = "勾选的程序只要开着窗口，按钮就会从任务栏移到悬浮栏（不必凑够两个窗口）。"
                + "这是给自动接管补漏用的，也可以在关掉自动接管时只接管这里选中的程序。",
             FontSize = palette.FontSizeMedium,
-            LineHeight = 23,
-            Margin = new Thickness(0, 10, 0, 0),
+            LineHeight = 21,
+            Margin = new Thickness(0, 8, 0, 0),
             Foreground = _mutedBrush,
             TextWrapping = TextWrapping.Wrap,
         });
@@ -120,14 +120,14 @@ internal sealed class ProcessPickerWindow : Window
         {
             Text = "正在扫描运行中的程序…",
             FontSize = palette.FontSizeSmall,
-            Margin = new Thickness(0, 14, 0, 8),
+            Margin = new Thickness(0, 10, 0, 6),
             Foreground = _mutedBrush,
         };
         root.Children.Add(_status);
 
         var scroller = new ScrollViewer
         {
-            Height = 396,
+            Height = 370,
             VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             Content = _list,
@@ -145,7 +145,7 @@ internal sealed class ProcessPickerWindow : Window
         {
             Orientation = Orientation.Horizontal,
             HorizontalAlignment = HorizontalAlignment.Right,
-            Margin = new Thickness(0, 16, 0, 0),
+            Margin = new Thickness(0, 12, 0, 0),
         };
 
         buttons.Children.Add(BuildButton("浏览 exe…", _textBrush, Brushes.Transparent, _lineBrush, Browse));
@@ -276,17 +276,17 @@ internal sealed class ProcessPickerWindow : Window
 
         var icon = new Image
         {
-            Width = 20,
-            Height = 20,
+            Width = 18,
+            Height = 18,
             Stretch = Stretch.Uniform,
-            Margin = new Thickness(12, 0, 0, 0),
+            Margin = new Thickness(10, 0, 0, 0),
             VerticalAlignment = VerticalAlignment.Center,
         };
 
         var source = ShellInterop.GetExeIcon(entry.ExePath);
         if (source is not null) icon.Source = source;
 
-        var texts = new StackPanel { Margin = new Thickness(12, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
+        var texts = new StackPanel { Margin = new Thickness(10, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
 
         var titleBlock = new TextBlock
         {
@@ -300,7 +300,7 @@ internal sealed class ProcessPickerWindow : Window
             Text = running && entry.WindowCount > 0 ? $"{entry.WindowCount} 个窗口" : entry.SampleTitle.Length > 0 ? entry.SampleTitle : "下次开窗时接管",
             FontSize = _palette.FontSizeSmall,
             Foreground = _mutedBrush,
-            Margin = new Thickness(0, 3, 0, 0),
+            Margin = new Thickness(0, 2, 0, 0),
             TextTrimming = TextTrimming.CharacterEllipsis,
         };
 
@@ -323,8 +323,8 @@ internal sealed class ProcessPickerWindow : Window
             // 圆角/线宽/无描边都照悬浮栏按钮来，这样两边的高亮块长得一样
             CornerRadius = new CornerRadius(7),
             BorderThickness = new Thickness(2),
-            Padding = new Thickness(13, 9, 13, 9),
-            Margin = new Thickness(2, 0, 2, 6),
+            Padding = new Thickness(11, 6, 11, 6),
+            Margin = new Thickness(2, 0, 2, 3),
             Background = Brushes.Transparent,
             BorderBrush = Brushes.Transparent,
             Cursor = Cursors.Hand,
@@ -430,7 +430,7 @@ internal sealed class ProcessPickerWindow : Window
         var button = new Border
         {
             MinWidth = 96,
-            Height = 36,
+            Height = 34,
             // 圆角与悬浮栏按钮一致
             CornerRadius = new CornerRadius(7),
             Background = background,

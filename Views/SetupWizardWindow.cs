@@ -24,6 +24,12 @@ internal sealed class SetupWizardWindow : Window
     private readonly Brush _accentBrush;
     private readonly Brush _lineBrush;
 
+    /// <summary>选中/悬浮的高亮，与悬浮栏按钮同一份（Active、Hover 及其反色文字）。</summary>
+    private readonly Brush _activeBrush;
+    private readonly Brush _onActiveTextBrush;
+    private readonly Brush _hoverBrush;
+    private readonly Brush _hoverTextBrush;
+
     private ThemePalette _palette = ThemePalette.Resolve();
 
     private readonly List<FrameworkElement> _pages = new();
@@ -51,6 +57,10 @@ internal sealed class SetupWizardWindow : Window
         _mutedBrush = Brush(_palette.Muted);
         _accentBrush = Brush(_palette.Accent);
         _lineBrush = Brush(_palette.Border);
+        _activeBrush = Brush(_palette.Active);
+        _onActiveTextBrush = Brush(_palette.ActiveText);
+        _hoverBrush = Brush(_palette.Hover);
+        _hoverTextBrush = Brush(_palette.HoverText);
 
         WindowStyle = WindowStyle.None;
         AllowsTransparency = true;
@@ -418,9 +428,9 @@ internal sealed class SetupWizardWindow : Window
             Child = check,
         };
 
-        var text = new StackPanel { Margin = new Thickness(13, 0, 0, 0) };
-        text.Children.Add(new TextBlock { Text = title, FontSize = _palette.FontSizeHeadline, Foreground = _textBrush, TextWrapping = TextWrapping.Wrap });
-        text.Children.Add(new TextBlock
+        var titleBlock = new TextBlock { Text = title, FontSize = _palette.FontSizeHeadline, Foreground = _textBrush, TextWrapping = TextWrapping.Wrap };
+
+        var descBlock = new TextBlock
         {
             Text = description,
             FontSize = _palette.FontSizeMedium,
@@ -428,7 +438,11 @@ internal sealed class SetupWizardWindow : Window
             Foreground = _mutedBrush,
             TextWrapping = TextWrapping.Wrap,
             Margin = new Thickness(0, 6, 0, 0),
-        });
+        };
+
+        var text = new StackPanel { Margin = new Thickness(13, 0, 0, 0) };
+        text.Children.Add(titleBlock);
+        text.Children.Add(descBlock);
 
         var grid = new Grid();
         grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
@@ -440,16 +454,46 @@ internal sealed class SetupWizardWindow : Window
 
         var row = new Border
         {
-            CornerRadius = new CornerRadius(_palette.ItemCornerRadius),
-            Padding = new Thickness(17, 15, 17, 15),
-            Margin = new Thickness(0, 0, 0, 12),
-            Background = _cardBrush,
+            // 与悬浮栏按钮同一套：圆角 7、线宽 2、不描边；选中 = 高亮底 + 文字反色，未选中完全透明
+            CornerRadius = new CornerRadius(7),
+            BorderThickness = new Thickness(2),
+            Padding = new Thickness(15, 12, 15, 12),
+            Margin = new Thickness(0, 0, 0, 8),
+            Background = Brushes.Transparent,
+            BorderBrush = Brushes.Transparent,
             Cursor = Cursors.Hand,
             Child = grid,
         };
 
         bool current = value;
-        ApplyToggle(box, check, current);
+
+        void Apply(bool on)
+        {
+            row.Background = on ? _activeBrush : Brushes.Transparent;
+            row.BorderBrush = Brushes.Transparent;
+
+            titleBlock.Foreground = on ? _onActiveTextBrush : _textBrush;
+            descBlock.Foreground = on ? _onActiveTextBrush : _mutedBrush;
+
+            // 勾选框代表"已勾选"，跟行高亮是两回事，保留
+            box.Background = on ? _accentBrush : Brushes.Transparent;
+            box.BorderBrush = on ? _accentBrush : _lineBrush;
+            check.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        Apply(current);
+
+        // 悬浮高亮：鼠标移上去才亮，和悬浮栏按钮一样（已选中的行保持高亮）
+        row.MouseEnter += (_, _) =>
+        {
+            if (current) return;
+
+            row.Background = _hoverBrush;
+            titleBlock.Foreground = _hoverTextBrush;
+            descBlock.Foreground = _hoverTextBrush;
+        };
+
+        row.MouseLeave += (_, _) => Apply(current);
 
         row.MouseLeftButtonUp += (_, e) =>
         {
@@ -461,18 +505,11 @@ internal sealed class SetupWizardWindow : Window
             if (confirm is not null && !confirm(next)) return;
 
             current = next;
-            ApplyToggle(box, check, current);
+            Apply(current);
             onChange(current);
         };
 
         return row;
-    }
-
-    private void ApplyToggle(Border box, TextBlock check, bool on)
-    {
-        box.Background = on ? _accentBrush : Brushes.Transparent;
-        box.BorderBrush = on ? _accentBrush : _lineBrush;
-        check.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private Border BuildRadio(string title, bool selected, Action onSelect, List<Action<bool>> group)
@@ -516,16 +553,29 @@ internal sealed class SetupWizardWindow : Window
 
         var row = new Border
         {
-            CornerRadius = new CornerRadius(_palette.ItemCornerRadius),
-            Padding = new Thickness(15, 12, 18, 12),
+            // 与悬浮栏按钮同一套：选中 = 高亮底 + 文字反色，不描边；未选中完全透明
+            CornerRadius = new CornerRadius(7),
+            BorderThickness = new Thickness(2),
+            Padding = new Thickness(14, 10, 16, 10),
             Margin = new Thickness(0, 0, 10, 0),
-            Background = _cardBrush,
+            Background = Brushes.Transparent,
+            BorderBrush = Brushes.Transparent,
             Cursor = Cursors.Hand,
             Child = grid,
         };
 
+        bool current = selected;
+
         void Apply(bool on)
         {
+            current = on;
+
+            row.Background = on ? _activeBrush : Brushes.Transparent;
+            row.BorderBrush = Brushes.Transparent;
+
+            label.Foreground = on ? _onActiveTextBrush : _textBrush;
+
+            // 圆点代表"已选中"，跟行高亮是两回事，保留
             circle.Background = on ? _accentBrush : Brushes.Transparent;
             circle.BorderBrush = on ? _accentBrush : _lineBrush;
             dot.Visibility = on ? Visibility.Visible : Visibility.Collapsed;
@@ -533,6 +583,17 @@ internal sealed class SetupWizardWindow : Window
 
         Apply(selected);
         group.Add(Apply);   // 让同一组里的其它选项能把我关掉
+
+        // 悬浮高亮：与悬浮栏按钮一致
+        row.MouseEnter += (_, _) =>
+        {
+            if (current) return;
+
+            row.Background = _hoverBrush;
+            label.Foreground = _hoverTextBrush;
+        };
+
+        row.MouseLeave += (_, _) => Apply(current);
 
         row.MouseLeftButtonUp += (_, e) =>
         {
