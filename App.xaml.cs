@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using System.IO;
+using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Media;
 using ExplorerDock.Interop;
@@ -26,6 +28,122 @@ public partial class App : Application
 
     public static Settings Settings { get; private set; } = new();
 
+    /// <summary>
+    /// 拿单实例锁。
+    ///
+    /// 必须接住 AbandonedMutexException：上一次实例被强杀（没走正常退出流程）时会抛它，
+    /// 不接住的话程序在启动第一步就死掉、连个提示都没有 —— 用户报的"双击没反应"就有这一份。
+    /// </summary>
+    private static Mutex CreateMutex(out bool createdNew)
+    {
+        try
+        {
+            return new Mutex(true, @"Local\ExplorerDock.SingleInstance.v1", out createdNew);
+        }
+        catch (AbandonedMutexException)
+        {
+            // 上一个实例死得不干净：锁归我们了，照常启动
+            createdNew = true;
+            return new Mutex(true, @"Local\ExplorerDock.SingleInstance.v1");
+        }
+        catch (Exception ex)
+        {
+            // 连锁都建不出来也别拦着启动
+            ReportCrash("Mutex", ex, showDialog: false);
+            createdNew = true;
+            return new Mutex();
+        }
+    }
+
+    public App()
+    {
+        // 程序是 WinExe：出错时既不打印也没提示，用户只能看到"双击没反应"。
+        // 所以这里把三类未处理异常都接住，写进日志、必要时弹个框告诉用户日志在哪。
+        AppDomain.CurrentDomain.UnhandledException += (_, e) => ReportCrash("AppDomain", e.ExceptionObject as Exception, showDialog: true);
+        DispatcherUnhandledException += (_, e) =>
+        {
+            ReportCrash("Dispatcher", e.Exception, showDialog: true);
+            e.Handled = true;
+        };
+        TaskScheduler.UnobservedTaskException += (_, e) =>
+        {
+            ReportCrash("Task", e.Exception, showDialog: false);
+            e.SetObserved();
+        };
+    }
+
+    private static int _crashDialogShown;
+
+    /// <summary>
+    /// 记一份崩溃日志（%TEMP%\ExplorerDock.crash.log），第一次出错时弹个框把路径告诉用户。
+    /// </summary>
+    internal static void ReportCrash(string source, Exception? ex, bool showDialog)
+    {
+        string path;
+
+        try
+        {
+            path = Path.Combine(Path.GetTempPath(), "ExplorerDock.crash.log");
+
+            var text = new StringBuilder();
+            text.AppendLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {source}");
+            text.AppendLine($"  版本: {typeof(App).Assembly.GetName().Version}");
+            text.AppendLine($"  系统: {Environment.OSVersion}  64位进程={Environment.Is64BitProcess}  运行时={Environment.Version}");
+            text.AppendLine($"  路径: {Environment.ProcessPath}");
+            text.AppendLine($"  命令行: {Environment.CommandLine}");
+            text.AppendLine(ex?.ToString() ?? "(没有异常对象)");
+            text.AppendLine();
+
+            File.AppendAllText(path, text.ToString());
+        }
+        catch
+        {
+            return;
+        }
+
+        if (!showDialog) return;
+        if (Interlocked.Increment(ref _crashDialogShown) > 1) return;
+
+        try
+        {
+            System.Windows.MessageBox.Show(
+                $"ExplorerDock 出错了：\n{ex?.Message}\n\n详细信息已写到：\n{path}",
+                "ExplorerDock",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+        }
+        catch
+        {
+            // 弹窗失败无所谓
+        }
+    }
+
+    /// <summary>
+    /// 启动就记一笔（%TEMP%\ExplorerDock.startup.log）。
+    /// 没有这一笔，就说明程序根本没跑起来（被杀软拦了、文件不全、架构不对等），
+    /// 那问题和我们的代码无关，得往安装/环境上查。
+    /// </summary>
+    private static void LogStartup(string mode)
+    {
+        try
+        {
+            var path = Path.Combine(Path.GetTempPath(), "ExplorerDock.startup.log");
+
+            var info = new FileInfo(path);
+            if (info.Exists && info.Length > 200_000) File.Delete(path);
+
+            File.AppendAllText(
+                path,
+                $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] 启动({mode}) 版本={typeof(App).Assembly.GetName().Version} " +
+                $"系统={Environment.OSVersion} 64位进程={Environment.Is64BitProcess} 运行时={Environment.Version} " +
+                $"路径={Environment.ProcessPath}{Environment.NewLine}");
+        }
+        catch
+        {
+            // 忽略
+        }
+    }
+
     /// <summary>主题变了。各常驻窗口（剪贴板面板这类）订阅它刷新自己的配色。</summary>
     public static event Action? ThemeChanged;
 
@@ -35,6 +153,8 @@ public partial class App : Application
     {
         base.OnStartup(e);
         ShutdownMode = ShutdownMode.OnExplicitShutdown;
+
+        LogStartup(e.Args.Length > 0 ? string.Join(' ', e.Args) : "界面");
 
         // 功能进程模式：没有界面，只跑"需要管理员权限"的那套脏活（枚举窗口、摘任务栏按钮、
         // 激活窗口、读写标签页），等界面进程通过命名管道连过来。放在最前面：它不受单实例锁限制。
@@ -101,7 +221,7 @@ public partial class App : Application
             WaitForPreviousInstance();
         }
 
-        _mutex = new Mutex(true, @"Local\ExplorerDock.SingleInstance.v1", out bool createdNew);
+        _mutex = CreateMutex(out bool createdNew);
 
         // ExplorerDock.exe --quit：让正在运行的实例走正常退出流程（会先把窗口按钮还给任务栏）
         if (e.Args.Any(a => a.Equals("--quit", StringComparison.OrdinalIgnoreCase)))
@@ -135,7 +255,7 @@ public partial class App : Application
                 // 忽略
             }
 
-            _mutex = new Mutex(true, @"Local\ExplorerDock.SingleInstance.v1", out createdNew);
+            _mutex = CreateMutex(out createdNew);
         }
 
         if (!createdNew)
