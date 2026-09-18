@@ -454,12 +454,14 @@ public partial class DockWindow : Window
 
         _scroller.MaxWidth = Math.Max(120, room);
 
-        // 高度上限：约屏幕一半（SizeToContent=WidthAndHeight 下，
-        // 不显式给 MaxHeight 就没有可滚空间，行一多会被窗口直接裁掉）。
+        // 高度上限：横幅模式约屏幕一半；堆叠模式给到四分之三（一列能摆下更多窗口才滚动）。
+        // SizeToContent=WidthAndHeight 下不显式给 MaxHeight 就没有可滚空间，行一多会被窗口直接裁掉。
         double verticalChrome = RootBorder.BorderThickness.Top + RootBorder.BorderThickness.Bottom
                               + RootBorder.Padding.Top + RootBorder.Padding.Bottom;
 
-        double tall = (SystemParameters.WorkArea.Height * 0.5 - verticalChrome) / Math.Max(1.0, _scale);
+        double ratio = StackMode ? 0.75 : 0.5;
+
+        double tall = (SystemParameters.WorkArea.Height * ratio - verticalChrome) / Math.Max(1.0, _scale);
 
         _scroller.MaxHeight = Math.Max(80, tall);
     }
@@ -1382,17 +1384,90 @@ public partial class DockWindow : Window
         => info.ProcessName.Length > 0 ? info.ProcessName : "explorer";
 
     /// <summary>取某个程序的行；没有就新建 —— 行的顺序 = 程序第一次出现的顺序。</summary>
+    /// <summary>堆叠模式：所有窗口按钮竖着一列排，不同程序之间夹分隔线。</summary>
+    private bool StackMode => App.Settings.Layout == DockLayout.Stack;
+
+    /// <summary>堆叠模式下按钮的统一宽度（按钮会横向撑满这一行）。</summary>
+    private const double StackButtonWidth = 260;
+
+    /// <summary>分隔线的标记：重排时靠它把旧的分隔线挑出来清掉。</summary>
+    private const string RowSeparatorTag = "row-separator";
+
     private StackPanel EnsureRow(string rowKey)
     {
         if (_rows.TryGetValue(rowKey, out var existing)) return existing;
 
-        var row = new StackPanel { Orientation = Orientation.Horizontal };
+        var row = new StackPanel
+        {
+            // 横幅：这个程序的窗口横着排一行；堆叠：竖着往下摞
+            Orientation = StackMode ? Orientation.Vertical : Orientation.Horizontal,
+        };
+
+        if (StackMode) row.MinWidth = StackButtonWidth;
 
         _rows[rowKey] = row;
         _rowOrder.Add(rowKey);
         _itemsHost.Children.Add(row);
 
+        UpdateRowSeparators();
+
         return row;
+    }
+
+    /// <summary>
+    /// 堆叠模式下在**不同程序之间**夹一条分隔线。
+    /// 同一个程序的多个窗口是同一个行容器里的兄弟，挨着排，不画线。
+    /// </summary>
+    private void UpdateRowSeparators()
+    {
+        for (int i = _itemsHost.Children.Count - 1; i >= 0; i--)
+        {
+            if (_itemsHost.Children[i] is Border { Tag: RowSeparatorTag })
+            {
+                _itemsHost.Children.RemoveAt(i);
+            }
+        }
+
+        if (!StackMode) return;
+
+        bool first = true;
+
+        foreach (var key in _rowOrder.ToList())
+        {
+            if (!_rows.TryGetValue(key, out var row)) continue;
+            if (row.Children.Count == 0) continue;
+
+            if (!first)
+            {
+                var index = _itemsHost.Children.IndexOf(row);
+                if (index >= 0) _itemsHost.Children.Insert(index, CreateRowSeparator());
+            }
+
+            first = false;
+        }
+    }
+
+    private Border CreateRowSeparator() => new()
+    {
+        Height = 1,
+        Margin = new Thickness(10, 3, 10, 3),
+        Background = new SolidColorBrush(_palette.Separator),
+        Tag = RowSeparatorTag,
+    };
+
+    /// <summary>切换布局模式后重建一遍：行容器的方向变了，旧的行不能接着用。</summary>
+    public void RebuildLayout()
+    {
+        _itemsHost.Children.Clear();
+        _rows.Clear();
+        _rowOrder.Clear();
+        _items.Clear();
+
+        UpdateScrollerMaxWidth();
+        QueueScrollButtonUpdate();
+
+        if (_lastSnapshot is not null) ApplySnapshot(_lastSnapshot);
+        else RefreshVisibility();
     }
 
     /// <summary>
@@ -1417,21 +1492,27 @@ public partial class DockWindow : Window
             if (!desired.Contains(key, StringComparer.OrdinalIgnoreCase)) desired.Add(key);
         }
 
-        bool same = desired.Count == _itemsHost.Children.Count;
+        // 只比"行"：堆叠模式下 _itemsHost 里还夹着分隔线
+        var rowsInPanel = _itemsHost.Children.OfType<StackPanel>().ToList();
+        bool same = desired.Count == rowsInPanel.Count;
 
         if (same)
         {
             for (int i = 0; i < desired.Count; i++)
             {
                 if (!_rows.TryGetValue(desired[i], out var row)) continue;
-                if (ReferenceEquals(_itemsHost.Children[i], row)) continue;
+                if (ReferenceEquals(rowsInPanel[i], row)) continue;
 
                 same = false;
                 break;
             }
         }
 
-        if (same) return;
+        if (same)
+        {
+            UpdateRowSeparators();
+            return;
+        }
 
         // 重新挂一遍：行里的按钮不受影响，只是换个先后
         _itemsHost.Children.Clear();
@@ -1443,6 +1524,8 @@ public partial class DockWindow : Window
 
         _rowOrder.Clear();
         _rowOrder.AddRange(desired);
+
+        UpdateRowSeparators();
     }
 
     /// <summary>窗口全关掉的程序，把它的整行撤掉。</summary>
@@ -1457,6 +1540,8 @@ public partial class DockWindow : Window
             _rows.Remove(key);
             _rowOrder.Remove(key);
         }
+
+        UpdateRowSeparators();
     }
 
     public void ApplySnapshot(ExplorerSnapshot snapshot)
@@ -2315,6 +2400,20 @@ public partial class DockWindow : Window
             MenuAction("剪贴板设置…", Host.OpenClipboardSettings),
             MenuAction("清空剪贴板历史", Host.ClearClipboardHistory)));
 
+        // 布局两项互斥：WPF 的 IsCheckable 会自己翻转，点完统一刷新
+        MenuItem? layoutBanner = null;
+        MenuItem? layoutStack = null;
+
+        layoutBanner = CheckItem(
+            "布局：横幅（每个程序一行）",
+            App.Settings.Layout == DockLayout.Banner,
+            _ => SelectLayout(DockLayout.Banner));
+
+        layoutStack = CheckItem(
+            "布局：堆叠（竖着一列）",
+            App.Settings.Layout == DockLayout.Stack,
+            _ => SelectLayout(DockLayout.Stack));
+
         menu.Items.Add(MenuGroup(
             "悬浮栏",
             // 这一项随状态换文案，隐藏之后还能从同一个位置再点回来
@@ -2329,9 +2428,20 @@ public partial class DockWindow : Window
                 Host.RebuildDockItems();
             }),
             MenuSeparator(),
+            layoutBanner,
+            layoutStack,
+            MenuSeparator(),
             CheckItem("贴边自动隐藏", App.Settings.EdgeAutoHide, Host.SetEdgeAutoHide),
             MenuAction("贴边隐藏设置…", Host.OpenEdgeHideSettings),
             MenuAction("回到屏幕顶部居中", ResetPosition)));
+
+        void SelectLayout(DockLayout layout)
+        {
+            Host.SetDockLayout(layout);
+
+            if (layoutBanner is not null) layoutBanner.IsChecked = App.Settings.Layout == DockLayout.Banner;
+            if (layoutStack is not null) layoutStack.IsChecked = App.Settings.Layout == DockLayout.Stack;
+        }
 
         // 主题四项必须互斥：WPF 的 IsCheckable 会自己翻转勾选，所以点完要统一刷新一遍
         MenuItem? themeAuto = null;

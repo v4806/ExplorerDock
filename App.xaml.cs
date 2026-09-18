@@ -1247,6 +1247,15 @@ public partial class App : Application
         Settings.Save();
     }
 
+    /// <summary>切换悬浮栏的排列方式（横幅 / 堆叠）。</summary>
+    public void SetDockLayout(DockLayout layout)
+    {
+        Settings.Layout = layout;
+        Settings.Save();
+
+        Dock?.RebuildLayout();
+    }
+
     /// <summary>开关「贴边自动隐藏」：关掉时如果正收纳着，立刻放回屏幕内。</summary>
     public void SetEdgeAutoHide(bool enabled)
     {

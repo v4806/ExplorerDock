@@ -36,6 +36,16 @@ public enum DockEdge
     Bottom = 4,
 }
 
+/// <summary>悬浮栏的排列方式。</summary>
+public enum DockLayout
+{
+    /// <summary>横幅：每个程序一行，行内横向排这个程序的窗口按钮（默认）。</summary>
+    Banner = 0,
+
+    /// <summary>堆叠：所有窗口按钮竖着排一列，程序之间用分隔线隔开。</summary>
+    Stack = 1,
+}
+
 public sealed class Settings
 {
     /// <summary>悬浮栏与菜单的配色方案。</summary>
@@ -109,6 +119,9 @@ public sealed class Settings
 
     /// <summary>是否显示悬浮栏。</summary>
     public bool ShowDock { get; set; } = true;
+
+    /// <summary>悬浮栏的排列方式：横幅 / 堆叠。</summary>
+    public DockLayout Layout { get; set; } = DockLayout.Banner;
 
     /// <summary>没有任何文件夹窗口时是否隐藏悬浮栏。</summary>
     public bool HideWhenEmpty { get; set; } = true;
