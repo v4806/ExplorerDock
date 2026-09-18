@@ -20,10 +20,7 @@ public partial class DockWindow : Window
     private readonly ScrollViewer _scroller;
     private readonly Border _grip;
 
-    /// <summary>横排内容容器：左右箭头 + 滚动区 + 上下箭头（把手在它外面，按布局模式换位置）。</summary>
-    private readonly StackPanel _contentRow;
-
-    /// <summary>把手上的点阵图标：堆叠模式要把把手转成横的，图标也得跟着转。</summary>
+    /// <summary>把手上的点阵图标（把手已去掉，这里只保留创建逻辑）。</summary>
     private TextBlock? _gripDots;
     private Border? _scrollLeft;
     private Border? _scrollRight;
@@ -166,30 +163,7 @@ public partial class DockWindow : Window
         _scrollUp = CreateScrollButton("\u2303", -1, vertical: true);
         _scrollDown = CreateScrollButton("\u2304", 1, vertical: true);
 
-        var verticalArrows = new StackPanel
-        {
-            Orientation = Orientation.Vertical,
-            VerticalAlignment = VerticalAlignment.Center,
-        };
-        verticalArrows.Children.Add(_scrollUp);
-        verticalArrows.Children.Add(_scrollDown);
-
-        // 横排内容：左箭头 + 滚动区 + 右箭头 + 上下箭头
-        _contentRow = new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            VerticalAlignment = VerticalAlignment.Center,
-        };
-
-        _contentRow.Children.Add(_scrollLeft);
-        _contentRow.Children.Add(_scroller);
-        _contentRow.Children.Add(_scrollRight);
-        _contentRow.Children.Add(verticalArrows);
-
-        // 把手：横幅模式在左边竖着放；堆叠模式挪到顶上横着放（见 ApplyLayoutOrientation）
-        RootPanel.Children.Add(_grip);
-        RootPanel.Children.Add(_contentRow);
-
+        // 怎么摆（箭头在哪条边）由 ApplyLayoutOrientation 决定
         ApplyLayoutOrientation();
 
         _scroller.ScrollChanged += (_, _) => UpdateScrollButtons();
@@ -472,9 +446,7 @@ public partial class DockWindow : Window
         else
         {
             double room = (MaxWidth - chrome) / Math.Max(1.0, _scale);
-            room -= _grip?.Width ?? 0;
             room -= (_scrollLeft?.Width ?? 0) + (_scrollRight?.Width ?? 0);
-            room -= 16;   // 纵向那对箭头占的一条
 
             _scroller.MaxWidth = Math.Max(120, room);
         }
@@ -1467,8 +1439,7 @@ public partial class DockWindow : Window
             }
         }
 
-        if (!StackMode) return;
-
+        // 两种模式都要：不同程序之间画一条线（同一程序的多个窗口挨着，不画）
         bool first = true;
 
         foreach (var key in _rowOrder.ToList())
@@ -1510,39 +1481,59 @@ public partial class DockWindow : Window
     }
 
     /// <summary>
-    /// 按布局模式摆放把手：
-    /// 横幅 = 把手在左侧竖着；堆叠 = 把手挪到顶部横着。
+    /// 按布局模式摆内容（**把手整个去掉了**：整条任意位置都能按住拖、都能右键出菜单，用不着它）：
+    /// 横幅 = 左右箭头分列两侧 + 滚动区；堆叠 = 上下箭头分列顶部/底部 + 滚动区。
     ///
-    /// 堆叠模式下整条本来就窄（一列按钮），左边再横着占 22px 更挤；
-    /// 放顶上横着既省宽度，也不用改拖动的判定。
+    /// 箭头只在"那边还能滚"的时候才显示（显隐由 UpdateScrollButtons 管），
+    /// 所以顶部那个一定是向上、底部那个一定是向下。
     /// </summary>
     private void ApplyLayoutOrientation()
     {
+        RootPanel.Children.Clear();
+
         if (StackMode)
         {
             RootPanel.Orientation = Orientation.Vertical;
 
-            _grip.Width = double.NaN;
-            _grip.Height = 20;
-            _grip.HorizontalAlignment = HorizontalAlignment.Stretch;
-            _grip.VerticalAlignment = VerticalAlignment.Center;
+            LayoutArrow(_scrollUp, horizontal: true);
+            LayoutArrow(_scrollDown, horizontal: true);
 
-            // 把手横过来了，点阵图标也跟着转成横的
-            if (_gripDots is not null) _gripDots.RenderTransform = new RotateTransform(90);
+            RootPanel.Children.Add(_scrollUp);
+            RootPanel.Children.Add(_scroller);
+            RootPanel.Children.Add(_scrollDown);
         }
         else
         {
             RootPanel.Orientation = Orientation.Horizontal;
 
-            _grip.Width = 22;
-            _grip.Height = double.NaN;
-            _grip.HorizontalAlignment = HorizontalAlignment.Center;
-            _grip.VerticalAlignment = VerticalAlignment.Stretch;
+            LayoutArrow(_scrollLeft, horizontal: false);
+            LayoutArrow(_scrollRight, horizontal: false);
 
-            if (_gripDots is not null) _gripDots.RenderTransform = Transform.Identity;
+            RootPanel.Children.Add(_scrollLeft);
+            RootPanel.Children.Add(_scroller);
+            RootPanel.Children.Add(_scrollRight);
         }
 
         UpdateScrollerMaxWidth();
+    }
+
+    /// <summary>滚动箭头的外形：左右箭头是窄竖条，上下箭头是扁横条。</summary>
+    private static void LayoutArrow(Border? arrow, bool horizontal)
+    {
+        if (arrow is null) return;
+
+        if (horizontal)
+        {
+            arrow.Width = double.NaN;
+            arrow.Height = 16;
+            arrow.HorizontalAlignment = HorizontalAlignment.Stretch;
+        }
+        else
+        {
+            arrow.Width = 16;
+            arrow.Height = double.NaN;
+            arrow.HorizontalAlignment = HorizontalAlignment.Center;
+        }
     }
 
     /// <summary>
