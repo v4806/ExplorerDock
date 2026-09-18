@@ -50,7 +50,7 @@ internal sealed class UpdateWindow : Window
 
         _status = new TextBlock
         {
-            Text = $"正在检查更新…（当前版本 {UpdateChecker.CurrentVersionText}）",
+            Text = "正在检查更新…",
             FontSize = palette.FontSizeMedium,
             LineHeight = 22,
             Foreground = mutedBrush,
@@ -62,7 +62,7 @@ internal sealed class UpdateWindow : Window
 
         _progress = new ProgressBar
         {
-            Height = 4,
+            Height = 6,
             Minimum = 0,
             Maximum = 1,
             Value = 0,
@@ -166,29 +166,25 @@ internal sealed class UpdateWindow : Window
 
             if (info is null)
             {
-                SetStatus($"当前已是最新版本（{UpdateChecker.CurrentVersionText}）。");
+                SetStatus("已是最新版本");
                 return;
             }
 
             if (info.Setup is null)
             {
-                SetStatus($"发现新版本 {info.Tag}，但这个版本还没有可下载的安装包。");
+                SetStatus($"发现新版本 {info.Tag}，但还没有可下载的安装包");
                 return;
             }
 
-            SetStatus($"发现新版本 {info.Tag}（当前 {UpdateChecker.CurrentVersionText}）。");
+            SetStatus($"发现新版本 {info.Tag}");
 
             bool download = ConfirmDialog.Confirm(
                 $"发现新版本 {info.Tag}",
-                "是否下载这个版本的安装包？下载完成后会自动运行它，是否继续安装由你决定。",
+                "是否下载并运行安装包？",
                 "下载",
                 "取消");
 
-            if (!download)
-            {
-                SetStatus($"发现新版本 {info.Tag}，已取消下载。");
-                return;
-            }
+            if (!download) return;
 
             await DownloadAndRunAsync(info.Setup);
         }
@@ -206,11 +202,23 @@ internal sealed class UpdateWindow : Window
     {
         _progress.Value = 0;
         _progress.Visibility = Visibility.Visible;
+        SetStatus("正在下载 0%");
+
+        var total = asset.Size > 0 ? asset.Size : 0;
 
         var progress = new Progress<double>(value =>
         {
             _progress.Value = value;
-            SetStatus($"正在下载 {asset.Name}… {value:P0}");
+
+            var text = $"正在下载 {value:P0}";
+
+            if (total > 0)
+            {
+                var done = (long)Math.Round(total * Math.Clamp(value, 0, 1));
+                text += $"（{FormatSize(done)} / {FormatSize(total)}）";
+            }
+
+            SetStatus(text);
         });
 
         try
@@ -219,11 +227,13 @@ internal sealed class UpdateWindow : Window
 
             if (_cts.IsCancellationRequested) return;
 
-            SetStatus($"安装包已下载到：{path}" + Environment.NewLine +
-                      "正在启动安装程序 —— 是否继续安装由你在安装界面里决定。");
+            SetStatus("下载完成，正在启动安装程序…");
 
             // 只运行安装包，不静默安装
             Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+
+            // 下载完、安装程序也起来了，这个窗口就没用了：自动关掉，不用用户再点一次"关闭"
+            Close();
         }
         catch (OperationCanceledException)
         {
@@ -240,6 +250,20 @@ internal sealed class UpdateWindow : Window
     }
 
     private void SetStatus(string text) => _status.Text = text;
+
+    /// <summary>把字节数写成 GB / MB / KB，给下载进度文本用。</summary>
+    private static string FormatSize(long bytes)
+    {
+        const long kb = 1024;
+        const long mb = kb * 1024;
+        const long gb = mb * 1024;
+
+        if (bytes >= gb) return $"{bytes / (double)gb:0.00} GB";
+        if (bytes >= mb) return $"{bytes / (double)mb:0.0} MB";
+        if (bytes >= kb) return $"{bytes / (double)kb:0.0} KB";
+
+        return $"{bytes} B";
+    }
 
     protected override void OnClosed(EventArgs e)
     {
