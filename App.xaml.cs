@@ -1661,29 +1661,12 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// 重启文件资源管理器。
+    /// 重启文件资源管理器：杀掉现有 explorer 进程，再拉一个新的。
     ///
-    /// 优先用随程序带的 tools\RestartExplorer.exe（比"杀掉 explorer 再拉起来"省事、可靠）；
-    /// 找不到它（比如只拷了单个 exe 出来跑）就退回内置的简单实现。
-    /// 只给菜单里的「重启资源管理器」用 —— 退出软件不再走这条路。
+    /// 只给菜单里的「重启资源管理器」用 —— 退出软件不走这条路（退出用无损取消接管）。
     /// </summary>
     public static void RestartExplorer()
     {
-        try
-        {
-            var tool = Path.Combine(AppContext.BaseDirectory, "tools", "RestartExplorer.exe");
-
-            if (File.Exists(tool))
-            {
-                Process.Start(new ProcessStartInfo(tool) { UseShellExecute = true });
-                return;
-            }
-        }
-        catch
-        {
-            // 起不来就退回下面那套
-        }
-
         try
         {
             foreach (var process in Process.GetProcessesByName("explorer"))
