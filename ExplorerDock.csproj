@@ -31,7 +31,11 @@
       · Ribbon / 打印（ReachFramework、System.Printing）—— 没用这些控件
       · 调试支持（mscordaccore/mscordbi、DiaSymReader）
       · VB 运行时、目录服务、事件日志消息资源
+      · PKCS、Linq.Parallel/AsyncEnumerable、Microsoft.CSharp、UIA 服务端 provider、WPF 的 Fluent 主题
       · pdb
+
+    注意：System.Configuration.ConfigurationManager 删不得 —— WPF 的 BaseCompatibilityPreferences
+    静态构造会加载它，删了启动直接崩（实测过：TypeInitializationException）。
   -->
   <Target Name="StripUnusedRuntimeFiles" AfterTargets="Publish">
     <ItemGroup>
@@ -47,6 +51,12 @@
       <UnusedRuntimeFile Include="$(PublishDir)Microsoft.VisualBasic.Core.dll" />
       <UnusedRuntimeFile Include="$(PublishDir)System.DirectoryServices.dll" />
       <UnusedRuntimeFile Include="$(PublishDir)System.Diagnostics.EventLog.Messages.dll" />
+      <UnusedRuntimeFile Include="$(PublishDir)System.Security.Cryptography.Pkcs.dll" />
+      <UnusedRuntimeFile Include="$(PublishDir)System.Linq.AsyncEnumerable.dll" />
+      <UnusedRuntimeFile Include="$(PublishDir)System.Linq.Parallel.dll" />
+      <UnusedRuntimeFile Include="$(PublishDir)Microsoft.CSharp.dll" />
+      <UnusedRuntimeFile Include="$(PublishDir)UIAutomationClientSideProviders.dll" />
+      <UnusedRuntimeFile Include="$(PublishDir)PresentationFramework.Fluent.dll" />
       <UnusedRuntimeFile Include="$(PublishDir)*.pdb" />
     </ItemGroup>
 
