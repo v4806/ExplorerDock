@@ -1588,20 +1588,22 @@ public partial class App : Application
 
     public void ExitApp()
     {
-        // 一上来就重启文件资源管理器：任务栏重建后，被摘掉的窗口按钮自然就回来了。
-        // 不去等"逐个把按钮还回去"，直接重启（异步启动，不等它结束）
         try
         {
-            RestartExplorer();
+            _windowHost?.Dispose();
         }
         catch
         {
             // 忽略
         }
 
+        // 功能进程退干净了（没人再去摘任务栏按钮）才能重启资源管理器：
+        // 反过来的话，explorer 重建任务栏时我们还在摘按钮，任务栏就会拖很久才正常
+        // （用户报的"退出后任务栏半天不出来"）。
+        // 放在这儿而不是最末尾：后面的收尾（写剪贴板落盘等）与重启 explorer 并行，用户更早看到任务栏。
         try
         {
-            _windowHost?.Dispose();
+            RestartExplorer();
         }
         catch
         {

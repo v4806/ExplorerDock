@@ -412,7 +412,12 @@ internal sealed class HostRuntime : IDisposable
                     break;
 
                 case HostProtocol.CmdExit:
-                    // 界面要退了：不用它再等我们，直接还按钮 + 结束进程
+                    // 先回一句再走：界面那边是同步等回复的（等 1.5 秒），
+                    // 不回复的话它会白等，退出流程白白多花一秒多
+                    message.Ok = true;
+                    Reply(message);
+
+                    // 界面要退了：不做什么收尾，立刻结束自己
                     LeaveNow();
                     return false;
 
