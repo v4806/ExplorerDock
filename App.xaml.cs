@@ -1540,8 +1540,29 @@ public partial class App : Application
         }
     }
 
+    /// <summary>
+    /// 重启文件资源管理器。
+    ///
+    /// 优先用随程序带的 tools\RestartExplorer.exe（比"杀掉 explorer 再拉起来"省事、可靠）；
+    /// 找不到它（比如只拷了单个 exe 出来跑）就退回内置的简单实现。
+    /// </summary>
     public static void RestartExplorer()
     {
+        try
+        {
+            var tool = Path.Combine(AppContext.BaseDirectory, "tools", "RestartExplorer.exe");
+
+            if (File.Exists(tool))
+            {
+                Process.Start(new ProcessStartInfo(tool) { UseShellExecute = true });
+                return;
+            }
+        }
+        catch
+        {
+            // 起不来就退回下面那套
+        }
+
         try
         {
             foreach (var process in Process.GetProcessesByName("explorer"))
@@ -1567,20 +1588,20 @@ public partial class App : Application
 
     public void ExitApp()
     {
+        // 一上来就重启文件资源管理器：任务栏重建后，被摘掉的窗口按钮自然就回来了。
+        // 不去等"逐个把按钮还回去"，直接重启（异步启动，不等它结束）
         try
         {
-            _windowHost?.Dispose();
+            RestartExplorer();
         }
         catch
         {
             // 忽略
         }
 
-        // 退出时重启一次文件资源管理器：任务栏会重建，被摘掉的窗口按钮自然就回来了。
-        // 比一个个把按钮 AddTab 回去可靠 —— 不用记谁被摘过，也不会把早关掉的窗口还回来。
         try
         {
-            RestartExplorer();
+            _windowHost?.Dispose();
         }
         catch
         {

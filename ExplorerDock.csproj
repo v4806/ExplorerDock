@@ -30,6 +30,13 @@
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4191.47" />
   </ItemGroup>
 
+  <!-- 退出时用来重启文件资源管理器的小工具，随程序一起输出/打包 -->
+  <ItemGroup>
+    <Content Include="tools\RestartExplorer.exe">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
 </Project>
 
 

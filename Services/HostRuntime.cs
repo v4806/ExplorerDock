@@ -57,16 +57,22 @@ internal sealed class HostRuntime : IDisposable
 
         StartWatchdog();
 
+        var attempts = 0;
+
         while (!_stop.IsSet)
         {
+            bool served = false;
+
             try
             {
                 AcceptAndServeAsync().GetAwaiter().GetResult();
+
+                // 服务过又断开 = 界面走了
+                served = true;
             }
             catch
             {
-                // 界面进程断开、管道出错：退回去等下一次连接。
-                // 从没连上过也记一笔，交给看门狗收尾
+                // 还没连上（界面可能正在启动），记一笔交给看门狗
                 if (!_uiConnected && _uiDisconnectedAt == DateTime.MinValue) _uiDisconnectedAt = DateTime.UtcNow;
             }
 
@@ -74,14 +80,25 @@ internal sealed class HostRuntime : IDisposable
 
             if (_stop.IsSet) break;
 
-            Thread.Sleep(300);
+            // 界面连上过又断了：立刻把任务栏按钮还回去并退出，不再等它回来
+            // （界面重新启动时会拉起新的功能进程）
+            if (served)
+            {
+                _host.RestoreNow();
+                break;
+            }
+
+            // 从没连上过：给几次机会，别界面还在启动就自己先走了
+            if (++attempts >= 5) break;
+
+            Thread.Sleep(400);
         }
 
         _host.Dispose();
     }
 
-    /// <summary>界面进程断开多久还没回来，就认定它已经走了。</summary>
-    private const double HostIdleExitSeconds = 8;
+    /// <summary>界面进程断开多久还没回来，就认定它已经走了（兜底用，正常路径断开即退）。</summary>
+    private const double HostIdleExitSeconds = 2;
 
     /// <summary>界面进程当前是不是连着。</summary>
     private volatile bool _uiConnected;
@@ -246,6 +263,23 @@ internal sealed class HostRuntime : IDisposable
         _uiConnected = false;
         _uiDisconnectedAt = DateTime.UtcNow;
         AltTabController.Log("host: ui disconnected");
+
+        // 界面连上过又断开 = 界面已经走了：立刻把任务栏按钮还回去并结束自己，不做任何等待。
+        // 界面要是重新启动，会拉起新的功能进程。
+        LeaveNow();
+    }
+
+    /// <summary>
+    /// 界面没了（或者界面让它退）就立刻结束自己。
+    ///
+    /// 不在这里做"把任务栏按钮还回去"：任务栏相关的收尾由界面那边重启文件资源管理器解决，
+    /// 这里只管消失，不留僵尸。
+    /// </summary>
+    private void LeaveNow()
+    {
+        AltTabController.Log("host: ui gone, exiting");
+
+        Environment.Exit(0);
     }
 
     /// <summary>处理一条命令；返回 false 表示该收摊了。</summary>
@@ -378,8 +412,8 @@ internal sealed class HostRuntime : IDisposable
                     break;
 
                 case HostProtocol.CmdExit:
-                    _host.RestoreNow();
-                    _stop.Set();
+                    // 界面要退了：不用它再等我们，直接还按钮 + 结束进程
+                    LeaveNow();
                     return false;
 
                 default:
