@@ -1541,6 +1541,42 @@ public partial class App : Application
     }
 
     /// <summary>
+    /// 退出时安排"重启文件资源管理器"：本软件先彻底退干净，等一会儿再动手。
+    ///
+    /// 为什么要延迟：explorer 重建任务栏的那几秒里，只要我们还有人活着、还在摘按钮，
+    /// 任务栏就会很久都不正常（用户报的"退出后任务栏十多秒不出来"）。
+    /// 又因为要"等本软件退完"这件事没法在本进程里等（它自己就是要退的那个），
+    /// 所以交给一个独立的 cmd 进程：先 ping 延迟，再运行重启工具。
+    /// </summary>
+    private static void ScheduleRestartExplorer(int delaySeconds)
+    {
+        try
+        {
+            var tool = Path.Combine(AppContext.BaseDirectory, "tools", "RestartExplorer.exe");
+
+            // ping 的 -n 是"发几个包"，大约等于秒数（多 1 个包保证够）
+            var wait = $"ping -n {Math.Max(2, delaySeconds + 1)} 127.0.0.1 > nul";
+
+            var action = File.Exists(tool)
+                ? $"\"{tool}\""
+                : "taskkill /f /im explorer.exe > nul & start \"\" explorer.exe";
+
+            var info = new ProcessStartInfo("cmd.exe", $"/c {wait} & {action}")
+            {
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden,
+                UseShellExecute = false,
+            };
+
+            Process.Start(info);
+        }
+        catch
+        {
+            // 安排不上就算了，别影响退出
+        }
+    }
+
+    /// <summary>
     /// 重启文件资源管理器。
     ///
     /// 优先用随程序带的 tools\RestartExplorer.exe（比"杀掉 explorer 再拉起来"省事、可靠）；
@@ -1597,13 +1633,12 @@ public partial class App : Application
             // 忽略
         }
 
-        // 功能进程退干净了（没人再去摘任务栏按钮）才能重启资源管理器：
-        // 反过来的话，explorer 重建任务栏时我们还在摘按钮，任务栏就会拖很久才正常
-        // （用户报的"退出后任务栏半天不出来"）。
-        // 放在这儿而不是最末尾：后面的收尾（写剪贴板落盘等）与重启 explorer 并行，用户更早看到任务栏。
+        // 功能进程退干净了（没人再去摘任务栏按钮）才能重启资源管理器。
+        // 交给独立的 cmd 延迟几秒再动手：那会儿本软件已经彻底退完了，
+        // explorer 重建任务栏不会有人跟它抢（用户报的"退出后任务栏十多秒不出来"就是抢出来的）。
         try
         {
-            RestartExplorer();
+            ScheduleRestartExplorer(2);
         }
         catch
         {
