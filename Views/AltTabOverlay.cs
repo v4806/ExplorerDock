@@ -331,11 +331,11 @@ internal sealed class AltTabOverlay : Window
         _panel.BorderThickness = new Thickness(palette.Custom ? palette.CustomBorderThickness : palette.DockBorderThickness);
         _panel.Background = NewBrush(palette.SurfaceAlpha, palette.Background.R, palette.Background.G, palette.Background.B);
         _panel.BorderBrush = NewBrush(palette.Border.A, palette.Border.R, palette.Border.G, palette.Border.B);
-        // 卡片底色用 Chip（半透明块，叠在面板底色上）：浅色主题下是浅灰、深色主题下是亮灰，
-        // 卡片和文字都跟着主题走。
-        // 原来用 Hover —— 那在浅色主题下是不透明的深灰 #555，于是整个面板的卡片全是一块块黑的，
-        // 跟悬浮栏/剪贴板那套完全不搭。
-        _cardNormal = NewBrush(palette.Chip.A, palette.Chip.R, palette.Chip.G, palette.Chip.B);
+        // 普通卡底色用 ThumbBack（"缩略图底"那个弱色块）：它贴近面板底色，
+        // 这样选中卡的 Active 才拉得开对比 —— 跟剪贴板面板一个道理
+        // （那边普通条目是透明的、只有选中的才是亮块）。
+        // 之前用 Chip：Chip 和 Active 在自定义主题下只差几个百分点，选中项根本看不出来。
+        _cardNormal = NewBrush(palette.ThumbBack.A, palette.ThumbBack.R, palette.ThumbBack.G, palette.ThumbBack.B);
         _cardSelected = NewBrush(palette.Active.A, palette.Active.R, palette.Active.G, palette.Active.B);
         // 选中卡的描边跟剪贴板面板一致：主题描边色（自定义主题下不描边），不再用独立的高亮蓝
         _selectedBorderBrush = palette.Custom ? Brushes.Transparent : NewBrush(palette.Border.A, palette.Border.R, palette.Border.G, palette.Border.B);
