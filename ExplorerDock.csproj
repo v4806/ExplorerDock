@@ -30,6 +30,36 @@
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4191.47" />
   </ItemGroup>
 
+  <!--
+    打包体积：WPF 不支持 trimming，只能手工剔除运行时里确定用不到的部件。
+    下面这些没有任何代码路径会碰到（删错了会在启动/用功能时看到缺文件异常，本机冒烟测过）：
+      · System.Windows.Forms.Design —— WinForms 设计器支持，运行时用不到
+      · DataContract 序列化 / System.Data —— 我们只用 System.Text.Json
+      · Ribbon / 打印（ReachFramework、System.Printing）—— 没用这些控件
+      · 调试支持（mscordaccore/mscordbi、DiaSymReader）
+      · VB 运行时、目录服务、事件日志消息资源
+      · pdb
+  -->
+  <Target Name="StripUnusedRuntimeFiles" AfterTargets="Publish">
+    <ItemGroup>
+      <UnusedRuntimeFile Include="$(PublishDir)System.Windows.Forms.Design.dll" />
+      <UnusedRuntimeFile Include="$(PublishDir)System.Private.DataContractSerialization.dll" />
+      <UnusedRuntimeFile Include="$(PublishDir)System.Data.Common.dll" />
+      <UnusedRuntimeFile Include="$(PublishDir)System.Windows.Controls.Ribbon.dll" />
+      <UnusedRuntimeFile Include="$(PublishDir)ReachFramework.dll" />
+      <UnusedRuntimeFile Include="$(PublishDir)System.Printing.dll" />
+      <UnusedRuntimeFile Include="$(PublishDir)Microsoft.DiaSymReader.Native.amd64.dll" />
+      <UnusedRuntimeFile Include="$(PublishDir)mscordaccore*.dll" />
+      <UnusedRuntimeFile Include="$(PublishDir)mscordbi.dll" />
+      <UnusedRuntimeFile Include="$(PublishDir)Microsoft.VisualBasic.Core.dll" />
+      <UnusedRuntimeFile Include="$(PublishDir)System.DirectoryServices.dll" />
+      <UnusedRuntimeFile Include="$(PublishDir)System.Diagnostics.EventLog.Messages.dll" />
+      <UnusedRuntimeFile Include="$(PublishDir)*.pdb" />
+    </ItemGroup>
+
+    <Delete Files="@(UnusedRuntimeFile)" ContinueOnError="true" />
+  </Target>
+
 </Project>
 
 
