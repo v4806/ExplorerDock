@@ -4,7 +4,7 @@
 ;            -p:PublishSingleFile=false -o artifacts\publish-selfcontained
 
 #define MyAppName "ExplorerDock"
-#define MyAppVersion "1.0.4"
+#define MyAppVersion "1.0.5"
 #define MyAppPublisher "v4806"
 #define MyAppURL "https://github.com/v4806/ExplorerDock"
 #define MyAppExeName "ExplorerDock.exe"
@@ -40,8 +40,10 @@ MinVersion=10.0.17763
 PrivilegesRequired=lowest
 
 [Languages]
+; 注意：本机 Inno 安装目录里的 Default.isl 已被换成简体中文，
+; 所以英文那条不能再用 compiler:Default.isl（会再多出一个"简体中文"选项）
 Name: "chinesesimplified"; MessagesFile: "ChineseSimplified.isl"
-Name: "english"; MessagesFile: "compiler:Default.isl"
+Name: "english"; MessagesFile: "compiler:Languages\English.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
@@ -63,6 +65,45 @@ Filename: "{app}\{#MyAppExeName}"; Parameters: "--quit"; Flags: runhidden waitun
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}"
+
+[Code]
+// 卸载时问一句要不要连设置和剪贴板数据一起删掉。
+// 默认按钮是"否"（MB_DEFBUTTON2）—— 也就是默认保留数据。
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  DataDir: string;
+  TempDir: string;
+begin
+  if CurUninstallStep <> usPostUninstall then
+    Exit;
+
+  // 静默卸载不问，保持数据
+  if UninstallSilent then
+    Exit;
+
+  DataDir := ExpandConstant('{userappdata}\ExplorerDock');
+
+  if DirExists(DataDir) then
+  begin
+    if MsgBox('是否同时删除 ExplorerDock 的设置与剪贴板数据？' + #13#10 + #13#10 +
+              '数据目录：' + DataDir + #13#10 + #13#10 +
+              '选"否"会保留这些数据，重新安装后仍然可用。',
+              mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
+      DelTree(DataDir, True, True, True);
+  end;
+
+  // 顺手清掉临时目录里的日志与拖放中转文件
+  TempDir := GetEnv('TEMP');
+
+  if TempDir <> '' then
+  begin
+    DelTree(TempDir + '\ExplorerDock', True, True, True);
+    DeleteFile(TempDir + '\ExplorerDock.dock.log');
+    DeleteFile(TempDir + '\ExplorerDock.clipboard.log');
+    DeleteFile(TempDir + '\ExplorerDock.alttab.log');
+    DeleteFile(TempDir + '\ExplorerDock.aumid.log');
+  end;
+end;
 
 
 

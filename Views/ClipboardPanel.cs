@@ -97,6 +97,9 @@ internal sealed class ClipboardPanel : Window
     /// <summary>拖动期间面板自己的窗口句柄（把鼠标捕获和光标按回来时要用）。</summary>
     private IntPtr _dragHwnd;
 
+    /// <summary>面板自己弹出的子窗口（确认框/设置窗）还开着几个。</summary>
+    private int _childWindowsOpen;
+
     /// <summary>左侧栏里能当作"拖放分组目标"的一行（GroupId 为 null 表示未分组）。</summary>
     private sealed class SidebarDropTarget
     {
@@ -315,9 +318,12 @@ internal sealed class ClipboardPanel : Window
             // 这时按"点到别处"处理的话，面板会在拖动中途自己消失
             if (_dragging) return;
 
-            // 焦点被我们自己的子窗口（确认框/设置窗/收藏浮窗）抢走时不算"用户离开面板"，
-            // 面板不该因此自动关闭
-            if (NativeMethods.IsOwnProcessForeground()) return;
+            // 焦点被面板自己的子窗口（确认框/设置窗）抢走时不算"用户离开面板"，
+            // 面板不该因此自动关闭。
+            // 这里只认"自己的子窗口"，不能像原来那样用"前台是本进程窗口"——
+            // 悬浮栏也是本进程的，那样的话"面板开着时点悬浮栏呼出文件夹窗口"
+            // 这次失活会被当成自己人而放过去，面板就赖着不关了。
+            if (_childWindowsOpen > 0) return;
 
             HidePanel();
         };
@@ -444,12 +450,17 @@ internal sealed class ClipboardPanel : Window
     /// </summary>
     private void ShowChildWindow(Action open)
     {
+        // 子窗口（确认框/设置窗）是模态的，弹出时会抢走前台。
+        // 这段期间面板的失活不算"用户点到别处"，所以先记个数（见 Deactivated）。
+        _childWindowsOpen++;
+
         try
         {
             open();
         }
         finally
         {
+            _childWindowsOpen--;
             Refocus();
         }
     }

@@ -964,7 +964,14 @@ public partial class DockWindow : Window
     {
         if (!NativeMethods.IsWindow(hwnd)) return;
 
-        if (!NativeMethods.IsIconic(hwnd) && IsFrontApplicationWindow(hwnd))
+        bool front = IsFrontApplicationWindow(hwnd);
+
+        // 点击行为留一条日志：别的机器上"点了不最小化"时，靠它看清是哪一步判错的
+        DiagClick(
+            $"toggle hwnd=0x{hwnd.ToInt64():X} class={NativeMethods.GetClassNameSafe(hwnd)} " +
+            $"iconic={NativeMethods.IsIconic(hwnd)} front={front} fg=0x{NativeMethods.GetForegroundWindow().ToInt64():X}");
+
+        if (!NativeMethods.IsIconic(hwnd) && front)
         {
             NativeMethods.ShowWindow(hwnd, NativeMethods.SW_MINIMIZE);
             Diag($"minimize: 0x{hwnd.ToInt64():X}");
@@ -973,6 +980,27 @@ public partial class DockWindow : Window
         }
 
         Activate(hwnd);
+    }
+
+    /// <summary>
+    /// 点悬浮栏按钮的诊断日志（单独一个文件，不占 Diag 的 40 条额度）。
+    /// 超过 512KB 就不再写，免得长时间使用把文件撑大。
+    /// </summary>
+    private static void DiagClick(string message)
+    {
+        try
+        {
+            var path = Path.Combine(Path.GetTempPath(), "ExplorerDock.click.log");
+
+            var info = new FileInfo(path);
+            if (info.Exists && info.Length > 512 * 1024) return;
+
+            File.AppendAllText(path, $"{DateTime.Now:MM-dd HH:mm:ss.fff} {message}{Environment.NewLine}");
+        }
+        catch
+        {
+            // 日志失败无所谓
+        }
     }
 
     /// <summary>拖动悬停时已经激活过的文件夹窗口，避免每 250ms 反复抢前台。</summary>
@@ -1083,6 +1111,11 @@ public partial class DockWindow : Window
     /// </summary>
     private bool IsFrontApplicationWindow(IntPtr target)
     {
+        // 前台窗口直接就是它（或它的根窗口）：最可靠的情况。
+        // Win10 上点悬浮栏不一定会把前台抢走，这时前台还是那个文件夹窗口。
+        var foreground = NativeMethods.GetForegroundWindow();
+        if (foreground != IntPtr.Zero && NativeMethods.GetAncestor(foreground, NativeMethods.GA_ROOT) == target) return true;
+
         var handle = EnsureOurHandle();
         if (handle == IntPtr.Zero) return false;
 
@@ -1092,10 +1125,16 @@ public partial class DockWindow : Window
         while (guard++ < 300 && (current = NativeMethods.GetWindow(current, NativeMethods.GW_HWNDNEXT)) != IntPtr.Zero)
         {
             if (!NativeMethods.IsWindowVisible(current)) continue;
+
+            // 先认目标本身，再按 owner/类名过滤别的窗口。
+            // Win10 的文件资源管理器窗口带 owner，原来会被下面的过滤掉，
+            // 结果"最前的应用窗口"永远不是它 → 点悬浮栏只能切前台、最小化不了。
+            if (current == target) return true;
+
             if (NativeMethods.GetWindow(current, NativeMethods.GW_OWNER) != IntPtr.Zero) continue;
             if (IsShellWindow(NativeMethods.GetClassNameSafe(current))) continue;
 
-            return current == target;
+            return false;
         }
 
         return false;
@@ -1334,6 +1373,7 @@ public partial class DockWindow : Window
             () => Host.SetShowDock(!App.Settings.ShowDock)));
         menu.Items.Add(MenuSeparator());
         menu.Items.Add(MenuAction("设置向导…", Host.OpenSetupWizard));
+        menu.Items.Add(MenuAction("查看日志", Host.OpenLogs));
         menu.Items.Add(MenuSeparator());
         menu.Items.Add(CheckItem("以管理员身份运行", App.Settings.RunElevated, enabled =>
         {

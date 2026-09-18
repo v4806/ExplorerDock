@@ -681,6 +681,76 @@ public partial class App : Application
         }
     }
 
+    /// <summary>
+    /// 把所有诊断日志拼成一份文本，用系统默认的文本编辑器打开
+    /// （悬浮栏 / 托盘右键菜单里的"查看日志"）。
+    /// </summary>
+    public void OpenLogs()
+    {
+        try
+        {
+            var temp = Path.GetTempPath();
+
+            string[] names =
+            {
+                "ExplorerDock.dock.log",
+                "ExplorerDock.click.log",
+                "ExplorerDock.clipboard.log",
+                "ExplorerDock.alttab.log",
+                "ExplorerDock.aumid.log",
+            };
+
+            var builder = new System.Text.StringBuilder();
+
+            builder.AppendLine($"ExplorerDock 日志 · {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+            builder.AppendLine($"数据目录：{Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "ExplorerDock")}");
+            builder.AppendLine();
+
+            foreach (var name in names)
+            {
+                builder.AppendLine($"===== {name} =====");
+
+                var path = Path.Combine(temp, name);
+
+                if (!File.Exists(path))
+                {
+                    builder.AppendLine("(没有这个日志)");
+                    builder.AppendLine();
+                    continue;
+                }
+
+                try
+                {
+                    var lines = File.ReadAllLines(path);
+
+                    // 日志可能很长，只带最后 3000 行，记事本打开才不会卡
+                    if (lines.Length > 3000)
+                    {
+                        builder.AppendLine($"...(只显示最后 3000 行，共 {lines.Length} 行)");
+                        lines = lines[^3000..];
+                    }
+
+                    builder.AppendLine(string.Join(Environment.NewLine, lines));
+                }
+                catch (Exception ex)
+                {
+                    builder.AppendLine($"(读不出来：{ex.Message})");
+                }
+
+                builder.AppendLine();
+            }
+
+            var output = Path.Combine(temp, "ExplorerDock-logs.txt");
+            File.WriteAllText(output, builder.ToString());
+
+            Process.Start(new ProcessStartInfo(output) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"打开日志失败：{ex.Message}", "ExplorerDock", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
+    }
+
     /// <summary>清空剪贴板历史（保留收藏）。</summary>
     public void ClearClipboardHistory()
     {
