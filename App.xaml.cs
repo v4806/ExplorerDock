@@ -1661,46 +1661,11 @@ public partial class App : Application
     }
 
     /// <summary>
-    /// 退出时安排"重启文件资源管理器"：本软件先彻底退干净，等一会儿再动手。
-    ///
-    /// 为什么要延迟：explorer 重建任务栏的那几秒里，只要我们还有人活着、还在摘按钮，
-    /// 任务栏就会很久都不正常（用户报的"退出后任务栏十多秒不出来"）。
-    /// 又因为要"等本软件退完"这件事没法在本进程里等（它自己就是要退的那个），
-    /// 所以交给一个独立的 cmd 进程：先 ping 延迟，再运行重启工具。
-    /// </summary>
-    private static void ScheduleRestartExplorer(int delaySeconds)
-    {
-        try
-        {
-            var tool = Path.Combine(AppContext.BaseDirectory, "tools", "RestartExplorer.exe");
-
-            // ping 的 -n 是"发几个包"，大约等于秒数（多 1 个包保证够）
-            var wait = $"ping -n {Math.Max(2, delaySeconds + 1)} 127.0.0.1 > nul";
-
-            var action = File.Exists(tool)
-                ? $"\"{tool}\""
-                : "taskkill /f /im explorer.exe > nul & start \"\" explorer.exe";
-
-            var info = new ProcessStartInfo("cmd.exe", $"/c {wait} & {action}")
-            {
-                CreateNoWindow = true,
-                WindowStyle = ProcessWindowStyle.Hidden,
-                UseShellExecute = false,
-            };
-
-            Process.Start(info);
-        }
-        catch
-        {
-            // 安排不上就算了，别影响退出
-        }
-    }
-
-    /// <summary>
     /// 重启文件资源管理器。
     ///
     /// 优先用随程序带的 tools\RestartExplorer.exe（比"杀掉 explorer 再拉起来"省事、可靠）；
     /// 找不到它（比如只拷了单个 exe 出来跑）就退回内置的简单实现。
+    /// 只给菜单里的「重启资源管理器」用 —— 退出软件不再走这条路。
     /// </summary>
     public static void RestartExplorer()
     {
@@ -1744,21 +1709,22 @@ public partial class App : Application
 
     public void ExitApp()
     {
+        // 退出前先"临时取消接管"：走的是和右键菜单「接管任务栏按钮」同一条路 ——
+        // 窗口按钮回到任务栏、文件夹窗口也重新回到系统 Alt+Tab。
+        // 这一下**不写设置**（只调宿主，不碰 Settings.TakeoverEnabled），
+        // 下次启动照旧接管；这样退出是无损的，也不用去重启资源管理器。
         try
         {
-            _windowHost?.Dispose();
+            _windowHost?.SetTakeover(false);
         }
         catch
         {
             // 忽略
         }
 
-        // 功能进程退干净了（没人再去摘任务栏按钮）才能重启资源管理器。
-        // 交给独立的 cmd 延迟几秒再动手：那会儿本软件已经彻底退完了，
-        // explorer 重建任务栏不会有人跟它抢（用户报的"退出后任务栏十多秒不出来"就是抢出来的）。
         try
         {
-            ScheduleRestartExplorer(2);
+            _windowHost?.Dispose();
         }
         catch
         {
