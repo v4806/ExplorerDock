@@ -119,6 +119,74 @@ internal static class ShellInterop
         return icon;
     }
 
+    private static readonly Dictionary<string, ImageSource?> ExeIconCache = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// 取某个程序的图标（非文件夹窗口的悬浮栏按钮用）。
+    /// 和文件夹图标走同一条路：shell 的 jumbo(256px) 图像列表，缩下去最清晰。
+    /// </summary>
+    public static ImageSource? GetExeIcon(string? exePath)
+    {
+        if (string.IsNullOrWhiteSpace(exePath)) return null;
+
+        lock (ExeIconCache)
+        {
+            if (ExeIconCache.TryGetValue(exePath, out var cached)) return cached;
+        }
+
+        var icon = BuildFileIcon(exePath);
+
+        lock (ExeIconCache)
+        {
+            if (ExeIconCache.Count > 256) ExeIconCache.Clear();
+            ExeIconCache[exePath] = icon;
+        }
+
+        return icon;
+    }
+
+    private static ImageSource? BuildFileIcon(string path)
+    {
+        try
+        {
+            if (!File.Exists(path)) return null;
+
+            // 首选 shell 的 jumbo 图像列表
+            var info = new SHFILEINFO();
+            SHGetFileInfo(path, 0, ref info, (uint)Marshal.SizeOf<SHFILEINFO>(), SHGFI_SYSICONINDEX);
+
+            var iid = IIDIImageList;
+            if (SHGetImageList(SHIL_JUMBO, ref iid, out var list) == 0 && list is not null)
+            {
+                if (list.GetIcon(info.iIcon, ILD_TRANSPARENT, out var hIcon) == 0 && hIcon != IntPtr.Zero)
+                {
+                    var source = FromHIcon(hIcon);
+                    DestroyIcon(hIcon);
+                    if (source is not null) return source;
+                }
+            }
+        }
+        catch
+        {
+            // 落到下面的大图标路径
+        }
+
+        try
+        {
+            var info = new SHFILEINFO();
+            var h = SHGetFileInfo(path, 0, ref info, (uint)Marshal.SizeOf<SHFILEINFO>(), SHGFI_ICON | SHGFI_LARGEICON);
+            var src = FromHIcon(h);
+            if (h != IntPtr.Zero) DestroyIcon(h);
+            if (src is not null) return src;
+        }
+        catch
+        {
+            // 取不到就返回 null，调用方会退化成"只有文字"的按钮
+        }
+
+        return null;
+    }
+
     /// <summary>
     /// 取某个窗口的图标，给 Alt+Tab 卡片的标题栏用。
     /// 顺序照抄系统的做法：WM_GETICON(大) → WM_GETICON(小) → 窗口类的图标 → 宿主 exe 的图标。

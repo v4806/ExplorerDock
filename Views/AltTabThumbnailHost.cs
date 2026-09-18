@@ -24,6 +24,15 @@ internal sealed class AltTabThumbnailHost : IDisposable
     private IntPtr _hwnd;
     private readonly List<IntPtr> _registered = new();
 
+    /// <summary>
+    /// 这一层压在其他窗口上面，也会挡住 OLE 拖放的落点判定（拖到缩略图上时，
+    /// 系统把这一层当落点，下面的面板收不到消息）。所以它自己也接拖放，再把事件转交面板。
+    /// </summary>
+    public Action<DragEventArgs>? DragOverForward { get; set; }
+
+    /// <summary>见 <see cref="DragOverForward"/>：把落下事件转交给面板处理。</summary>
+    public Action<DragEventArgs>? DropForward { get; set; }
+
     /// <summary>按当前卡片位置摆好缩略图（在面板显示之后调用）。</summary>
     public void Show(IReadOnlyList<ThumbnailSlot> slots, Color background)
     {
@@ -113,6 +122,11 @@ internal sealed class AltTabThumbnailHost : IDisposable
         };
 
         _hwnd = new WindowInteropHelper(_window).EnsureHandle();
+
+        // 拖放转发：这一层的区域（各张缩略图）也要能当"卡片落点"
+        _window.AllowDrop = true;
+        _window.DragOver += (_, e) => DragOverForward?.Invoke(e);
+        _window.Drop += (_, e) => DropForward?.Invoke(e);
 
         // 鼠标穿透 + 不进任务栏/Alt+Tab
         long style = NativeMethods.GetWindowLongPtr(_hwnd, NativeMethods.GWL_EXSTYLE);

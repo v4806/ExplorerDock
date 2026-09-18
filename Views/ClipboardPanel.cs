@@ -100,6 +100,19 @@ internal sealed class ClipboardPanel : Window
     /// <summary>面板自己弹出的子窗口（确认框/设置窗）还开着几个。</summary>
     private int _childWindowsOpen;
 
+    /// <summary>
+    /// 面板显示期间盯着前台窗口：只要前台不再是面板自己，就收起来。
+    ///
+    /// 为什么不只靠 <see cref="Window.Deactivated"/>：面板的前台是"抢"来的，
+    /// 抢的时机和系统维护的激活状态不一定同步 —— 实测点某些子控件（QQ 编辑框、
+    /// 资源管理器的文件项/目录背景）时失活事件根本不来，面板就赖着不关了。
+    /// 轮询前台是"真的离开了就一定收"，不依赖事件是否送达。
+    /// </summary>
+    private readonly DispatcherTimer _foregroundWatch = new() { Interval = TimeSpan.FromMilliseconds(300) };
+
+    /// <summary>面板这次显示的时间点（刚弹出的宽限期内不做"已离开"判断）。</summary>
+    private long _shownAt;
+
     /// <summary>左侧栏里能当作"拖放分组目标"的一行（GroupId 为 null 表示未分组）。</summary>
     private sealed class SidebarDropTarget
     {
@@ -286,7 +299,7 @@ internal sealed class ClipboardPanel : Window
         {
             if (!_dragging) return;
 
-            if (!NativeMethods.IsKeyDown(VK_LBUTTON))
+            if (LeftButtonReleased())
             {
                 FinishItemDrag();
                 return;
@@ -327,6 +340,49 @@ internal sealed class ClipboardPanel : Window
 
             HidePanel();
         };
+
+        _foregroundWatch.Tick += (_, _) => WatchForeground();
+    }
+
+    /// <summary>
+    /// 左键是不是真的松开了。
+    ///
+    /// 不能只信自己的 `GetAsyncKeyState`：当前台是高权限程序时它会返回 0（UIPI），
+    /// 表现就是"拖得好好的突然被判成松手"，拖放在半路断掉（实测日志里拖到高权限
+    /// 窗口后就没有落点记录了）。本地说松了，再问一句提权进程，它也确认才算数。
+    /// </summary>
+    private bool LeftButtonReleased()
+    {
+        if (NativeMethods.IsKeyDown(VK_LBUTTON)) return false;
+
+        return Application.Current is not App app || !app.WindowHost.IsLeftButtonDown();
+    }
+
+    /// <summary>前台已经不是面板了就把面板收起来（兜住 Deactivated 没来的情况）。</summary>
+    private void WatchForeground()
+    {
+        if (!IsVisible)
+        {
+            _foregroundWatch.Stop();
+            return;
+        }
+
+        // 这几条与 Deactivated 里的判断保持一致
+        if (_suppressDeactivate || _dragging || _childWindowsOpen > 0) return;
+
+        // 刚弹出来的这一小会儿也不算：抢前台要跨进程跑一圈，别把它当成"用户已经离开"
+        if (Environment.TickCount64 - _shownAt < 800) return;
+
+        var handle = new WindowInteropHelper(this).Handle;
+        if (handle == IntPtr.Zero) return;
+
+        // 自己不能判断：普通权限的界面进程调 GetForegroundWindow 会返回 0
+        // （实测日志里就是 foreground=0），必须问提权进程
+        if (Application.Current is not App app) return;
+        if (app.WindowHost.IsForegroundWindow(handle)) return;
+
+        Services.ClipboardMonitor.Log("foreground watch -> hide panel");
+        HidePanel();
     }
 
     /// <summary>某条记录被点击（调用方负责写回剪贴板并粘贴）。</summary>
@@ -343,6 +399,12 @@ internal sealed class ClipboardPanel : Window
     /// 由外部把内容写进剪贴板并给那个窗口补一次 Ctrl+V。
     /// </summary>
     public event Action<ClipItem, IntPtr>? DroppedOnWindow;
+
+    /// <summary>
+    /// 松手落在我们自己的界面上（悬浮栏按钮 / Alt+Tab 卡片）：参数是落点的屏幕坐标。
+    /// 落在把手/空白上时由接收方判定"没有目标、不做事"。
+    /// </summary>
+    public event Action<ClipItem, int, int>? DroppedOnOwnSurface;
 
     /// <summary>点了"全部清除"。</summary>
     public event Action? ClearRequested;
@@ -426,9 +488,11 @@ internal sealed class ClipboardPanel : Window
         if (!IsVisible) Show();
         KeepOnTop();
 
-        // 我们是后台进程，系统不允许直接抢焦点，走 ForceForeground 才稳
+        // 抢前台交给功能进程（提权）去做：界面进程现在是普通权限，跨权限时
+        // SetForegroundWindow / AttachThreadInput 会被系统拒掉，面板根本拿不到前台
+        // —— 表现就是"呼出后一下子又自己关了"。
         var handle = new WindowInteropHelper(this).Handle;
-        if (handle != IntPtr.Zero) NativeMethods.ForceForeground(handle);
+        if (handle != IntPtr.Zero) (Application.Current as App)?.WindowHost.Activate(handle, -1);
 
         // 抢到"前台窗口"还不够：按键消息发给的是**线程焦点窗口**，
         // 跨进程抢焦点时这两个不一定是同一个窗口，必须再把键盘焦点落到面板上，
@@ -439,6 +503,10 @@ internal sealed class ClipboardPanel : Window
 
         // 等这一轮消息彻底处理完再恢复"失活即隐藏"，跳过显示瞬间的那次伪失活
         Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(() => _suppressDeactivate = false));
+
+        // 同时盯住前台：失活事件在某些点击路径下不一定送达
+        _shownAt = Environment.TickCount64;
+        _foregroundWatch.Start();
 
         Services.ClipboardMonitor.Log($"panel handle={handle} foreground={NativeMethods.GetForegroundWindow()} focus={NativeMethods.GetFocus()} active={IsActive}");
     }
@@ -873,8 +941,13 @@ internal sealed class ClipboardPanel : Window
         var target = NativeMethods.GetAncestor(under, NativeMethods.GA_ROOT);
         if (target == IntPtr.Zero) target = under;
 
-        // 拖到悬浮栏上不算拖到别的软件
-        if (NativeMethods.IsOwnProcess(target)) return;
+        // 落在我们自己身上：悬浮栏按钮 / Alt+Tab 卡片就是落点 —— 粘到那儿对应的窗口；
+        // 落在悬浮栏的把手、空白、箭头上则没有任何目标，什么都不做
+        if (NativeMethods.IsOwnProcess(target))
+        {
+            DroppedOnOwnSurface?.Invoke(item, point.X, point.Y);
+            return;
+        }
 
         Services.ClipboardMonitor.Log($"drag drop item={item.Id} target={target}");
         DroppedOnWindow?.Invoke(item, target);
@@ -935,7 +1008,9 @@ internal sealed class ClipboardPanel : Window
 
         _hoverActivated = target;
         Services.ClipboardMonitor.Log($"taskbar hover -> activate hwnd={target} title='{title}'");
-        NativeMethods.ForceForeground(target);
+
+        // 激活别的程序窗口交给窗口宿主：目标是管理员程序时不提权切不过去
+        (Application.Current as App)?.WindowHost.Activate(target, -1);
     }
 
     /// <summary>屏幕坐标是不是落在面板自己身上。</summary>
@@ -2184,55 +2259,13 @@ internal sealed class ClipboardPanel : Window
     /// <summary>把两个滚动条换成细的、跟主题同色的版本（系统默认那根太粗、颜色也对不上）。</summary>
     private void ApplyScrollBarStyle()
     {
-        try
-        {
-            var thumb = _mutedBrush is SolidColorBrush muted
-                ? $"#{(byte)(muted.Color.A * 0.35):X2}{muted.Color.R:X2}{muted.Color.G:X2}{muted.Color.B:X2}"
-                : "#30FFFFFF";
+        // 样式本身和 Alt+Tab 切换面板共用同一份，两处外观保持一致
+        var thumb = _mutedBrush is SolidColorBrush muted
+            ? muted.Color
+            : Color.FromArgb(0x30, 0xFF, 0xFF, 0xFF);
 
-            var xaml = $@"
-<Style xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'
-       xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml'
-       TargetType='ScrollBar'>
-  <Setter Property='Width' Value='8'/>
-  <Setter Property='Margin' Value='0,0,4,0'/>
-  <Setter Property='Background' Value='Transparent'/>
-  <Setter Property='Template'>
-    <Setter.Value>
-      <ControlTemplate TargetType='ScrollBar'>
-        <Grid Background='Transparent'>
-          <Track x:Name='PART_Track' IsDirectionReversed='True'>
-            <Track.Thumb>
-              <Thumb>
-                <Thumb.Template>
-                  <ControlTemplate TargetType='Thumb'>
-                    <Border CornerRadius='{_palette.ThumbCornerRadius}' Background='{thumb}'/>
-                  </ControlTemplate>
-                </Thumb.Template>
-              </Thumb>
-            </Track.Thumb>
-            <Track.IncreaseRepeatButton>
-              <RepeatButton Command='ScrollBar.PageDownCommand' Opacity='0' Focusable='False'/>
-            </Track.IncreaseRepeatButton>
-            <Track.DecreaseRepeatButton>
-              <RepeatButton Command='ScrollBar.PageUpCommand' Opacity='0' Focusable='False'/>
-            </Track.DecreaseRepeatButton>
-          </Track>
-        </Grid>
-      </ControlTemplate>
-    </Setter.Value>
-  </Setter>
-</Style>";
-
-            var style = (Style)System.Windows.Markup.XamlReader.Parse(xaml);
-
-            _scroller.Resources[typeof(System.Windows.Controls.Primitives.ScrollBar)] = style;
-            _sidebarScroll.Resources[typeof(System.Windows.Controls.Primitives.ScrollBar)] = style;
-        }
-        catch
-        {
-            // 样式没做出来也能正常滚动，只是样子回到系统的
-        }
+        ThemeScrollBar.Apply(_scroller, thumb, _palette);
+        ThemeScrollBar.Apply(_sidebarScroll, thumb, _palette);
     }
 
     private static SolidColorBrush NewBrush(byte a, byte r, byte g, byte b) => new(Color.FromArgb(a, r, g, b));

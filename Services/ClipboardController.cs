@@ -17,20 +17,9 @@ namespace ExplorerDock.Services;
 /// </summary>
 internal sealed class ClipboardController : IDisposable
 {
-    private const int VK_LWIN = 0x5B;
-    private const int VK_RWIN = 0x5C;
-    private const int VK_V = 0x56;
-    private const int VK_SHIFT = 0x10;
-    private const int VK_CONTROL = 0x11;
-    private const int VK_MENU = 0x12;
-
     private readonly App _app;
     private readonly ClipboardStore _store;
-    private readonly KeyboardHook _hook = new();
 
-    private volatile bool _winDown;
-    private volatile bool _vSwallowed;
-    private volatile bool _swallowWinUp;
     private IntPtr _originForeground;
 
     public ClipboardController(App app, ClipboardStore store)
@@ -41,11 +30,14 @@ internal sealed class ClipboardController : IDisposable
         Panel = new ClipboardPanel(store);
         Panel.ItemActivated += OnItemActivated;
         Panel.DroppedOnWindow += OnItemDroppedOnWindow;
+        Panel.DroppedOnOwnSurface += OnItemDroppedOnOwnSurface;
         Panel.FavoriteRequested += OnFavoriteRequested;
         Panel.DeleteRequested += item => _store.Remove(item);
         Panel.ClearRequested += _app.ClearClipboardHistory;
 
-        _hook.AddHandler(OnKey);
+        // Win+V 由提权进程里的钩子接管（管理员程序占前台时，普通权限的钩子收不到按键），
+        // 这边只响应它推过来的动作
+        _app.WindowHost.KeyAction += OnKeyAction;
     }
 
     public ClipboardPanel Panel { get; }
@@ -58,8 +50,7 @@ internal sealed class ClipboardController : IDisposable
 
     public void Start()
     {
-        _hook.Install();
-        ClipboardMonitor.Log($"clipboard hook installed={_hook.IsInstalled} takeover={App.Settings.ClipboardTakeover}");
+        ClipboardMonitor.Log($"clipboard takeover={App.Settings.ClipboardTakeover} installed={_app.WindowHost.KeyboardInstalled}");
 
         // 预热面板窗口句柄，第一次按 Win+V 就不用等窗口初始化
         _app.Dispatcher.BeginInvoke(new Action(() => Panel.Preload()));
@@ -87,83 +78,18 @@ internal sealed class ClipboardController : IDisposable
         }
     }
 
-    // ---------- 钩子线程 ----------
+    // ---------- 按键动作（由提权进程里的钩子推过来） ----------
 
-    private bool OnKey(KeyStroke stroke)
+    /// <summary>
+    /// Win+V 的判定（纯 Win+V、补见证键、吞 Win 抬起）全在提权进程那边做完了，
+    /// 这里只要把面板切一下。
+    /// </summary>
+    private void OnKeyAction(string action)
     {
-        try
-        {
-            if (!App.Settings.ClipboardTakeover) return false;
+        if (action != HostProtocol.KeyToggleClipboard) return;
+        if (!App.Settings.ClipboardTakeover) return;
 
-            switch (stroke.Vk)
-            {
-                case VK_LWIN:
-                case VK_RWIN:
-                    if (stroke.Down)
-                    {
-                        _winDown = true;
-                        return false;   // Win 键本身放行：开始菜单、其它 Win 组合键都不该受影响
-                    }
-
-                    _winDown = false;
-
-                    if (!_swallowWinUp) return false;
-
-                    _swallowWinUp = false;
-
-                    // 吞掉这次抬起（系统不该看到它，否则开始菜单会跟着弹），
-                    // 再补一次注入的抬起让 Win 键状态闭合 —— 不补的话 Win 会"卡住"，
-                    // 之后所有按键都会被当成 Win 组合，面板根本收不到键盘。
-                    ClipboardMonitor.Log("win-up swallowed + reinjected");
-                    NativeMethods.SendKeyUp((ushort)stroke.Vk);
-                    return true;
-
-                case VK_V:
-                    if (stroke.Down)
-                    {
-                        // 长按时 V 会不停重复发 down。这些重复事件必须**继续吞掉**：
-                        // 一旦放行，系统就看到了 V，会把它自己那个剪贴板面板也弹出来。
-                        // （Alt+Tab 那边就是每次都吞，所以从来没这个毛病）
-                        if (_vSwallowed) return true;
-
-                        if (!_winDown) return false;
-
-                        // 只有"纯 Win+V"归我们，Ctrl/Alt/Shift 掺进来的组合照旧给系统
-                        if (NativeMethods.IsKeyDown(VK_CONTROL)
-                            || NativeMethods.IsKeyDown(VK_MENU)
-                            || NativeMethods.IsKeyDown(VK_SHIFT))
-                        {
-                            return false;
-                        }
-
-                        _vSwallowed = true;
-                        _swallowWinUp = true;
-                        ClipboardMonitor.Log("win+v swallowed -> toggle panel");
-
-                        // 先补一个"见证按键"：不然系统会把随后的 Win 抬起当成单击 Win，弹开始菜单
-                        NativeMethods.SendWitnessKey();
-
-                        Post(() => Toggle());
-                        return true;
-                    }
-
-                    if (_vSwallowed)
-                    {
-                        _vSwallowed = false;
-                        return true;   // V 的抬起也吞掉，别让前台窗口收到半个组合键
-                    }
-
-                    return false;
-
-                default:
-                    return false;
-            }
-        }
-        catch
-        {
-            // 钩子里出任何岔子都当没接管，绝不能影响键盘
-            return false;
-        }
+        Post(Toggle);
     }
 
     private void Post(Action action)
@@ -194,14 +120,14 @@ internal sealed class ClipboardController : IDisposable
         if (origin == IntPtr.Zero || !NativeMethods.IsWindow(origin)) return;
 
         // 面板抢过焦点，这里把前台还给用户原来的窗口
-        NativeMethods.ForceForeground(origin);
+        _app.WindowHost.Activate(origin, -1);
 
         // 切前台是异步的：立刻发按键会落到我们自己或别的窗口上，等一小会儿再补
         var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(120) };
         timer.Tick += (_, _) =>
         {
             timer.Stop();
-            NativeMethods.SendCtrlV();
+            _app.WindowHost.SendPaste();
         };
         timer.Start();
     }
@@ -231,7 +157,7 @@ internal sealed class ClipboardController : IDisposable
         Panel.HidePanel();
 
         // 面板刚才是前台，把前台还给落点窗口，否则后续的点击和 Ctrl+V 会打到我们自己身上
-        NativeMethods.ForceForeground(target);
+        _app.WindowHost.Activate(target, -1);
 
         // 目标窗口虽然到了前台，但它的输入框不一定拿到了焦点（QQ 这类尤其明显），
         // 所以先在落点补一次真实点击，再把 Ctrl+V 递进去
@@ -240,13 +166,13 @@ internal sealed class ClipboardController : IDisposable
         {
             click.Stop();
 
-            if (NativeMethods.GetCursorPos(out var point)) NativeMethods.ClickAt(point.X, point.Y);
+            if (NativeMethods.GetCursorPos(out var point)) _app.WindowHost.ClickAtCursor();
 
             var paste = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(140) };
             paste.Tick += (_, _) =>
             {
                 paste.Stop();
-                NativeMethods.SendCtrlV();
+                _app.WindowHost.SendPaste();
                 Services.ClipboardMonitor.Log($"dropped -> clicked at cursor and sent ctrl+v to {target}");
             };
             paste.Start();
@@ -254,6 +180,14 @@ internal sealed class ClipboardController : IDisposable
         click.Start();
     }
 
+    /// <summary>
+    /// 拖着条目落在我们自己的界面上松手：悬浮栏按钮就粘到那个窗口（多标签窗口会先切到对应标签页），
+    /// Alt+Tab 卡片则是"粘到这张卡最后活动的那个窗口"。没落在按钮/卡片上就什么都不做。
+    /// </summary>
+    private void OnItemDroppedOnOwnSurface(ClipItem item, int screenX, int screenY)
+    {
+        _app.PasteClipItemOnOwnSurface(item, screenX, screenY);
+    }
     private void OnFavoriteRequested(ClipItem item)
     {
         // 第 4 轮换成"弹收藏设置浮窗、选分组"；现在先直接切换收藏状态
@@ -273,7 +207,8 @@ internal sealed class ClipboardController : IDisposable
 
         try
         {
-            _hook.Dispose();
+            // 钩子在提权进程那边，这里只要退订
+            _app.WindowHost.KeyAction -= OnKeyAction;
         }
         catch
         {

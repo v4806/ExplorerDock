@@ -17,51 +17,67 @@ namespace ExplorerDock.Services;
 internal sealed class AltTabController : IDisposable
 {
     private readonly App _app;
-    private readonly KeyboardHook _hook = new();
-
     private AltTabOverlay? _overlay;
     private List<AltTabWindowInfo> _items = new();
     private int _index;
     private volatile bool _active;
     private volatile bool _opening;
-    private volatile bool _altDown;
-    private volatile bool _shiftDown;
     private volatile bool _cancelPending;
     private bool _commitPending;
+
+    /// <summary>这一轮列表是不是"只含当前进程"（Alt+~ 打开的）。</summary>
+    private volatile bool _processScoped;
     private int _pendingTabs;
     private IntPtr _originForeground;
+
+    /// <summary>拖放悬停已经激活过哪张卡（DragOver 触发很密，同一张卡只抢一次前台）。</summary>
+    private int _dragHoverIndex = -1;
 
     public AltTabController(App app)
     {
         _app = app;
-        _hook.AddHandler(OnKey);
+
+        // 按键由提权进程里的钩子接管（管理员程序占前台时，普通权限的钩子收不到按键），
+        // 这边只负责响应它推过来的"动作"
+        _app.WindowHost.KeyAction += OnKeyAction;
     }
 
     /// <summary>面板是不是正开着（悬浮栏要用它避让置顶）。</summary>
     public bool IsActive => _active;
 
-    public bool IsInstalled => _hook.IsInstalled;
+    /// <summary>界面是否正在接管中（面板开着，或窗口列表还在数）。</summary>
+    public bool PanelBusy => _active || _opening;
+
+    public bool IsInstalled => _app.WindowHost.KeyboardInstalled;
 
     public void Start()
     {
-        _hook.Install();
+        _app.PushKeyState();
 
-        Log($"start installed={_hook.IsInstalled} injected={KeyboardHook.AllowInjected} takeover={App.Settings.AltTabTakeover}");
+        Log($"start installed={IsInstalled} injected={KeyboardHook.AllowInjected} takeover={App.Settings.AltTabTakeover}");
 
         // 预热面板窗口句柄，让第一次按 Alt+Tab 不用等窗口初始化
         _app.Dispatcher.BeginInvoke(new Action(() => EnsureOverlay()));
     }
 
-    /// <summary>诊断日志：写到 %TEMP%\ExplorerDock.alttab.log，超过 200KB 就不再写。</summary>
+    /// <summary>
+    /// 诊断日志：写到 %TEMP%\ExplorerDock.alttab.log（功能进程写 ExplorerDock.host.log）。
+    /// 超过 200KB 就不再写。
+    ///
+    /// 两个进程各写各的文件：同一个文件被两个进程同时追加会互相抢，日志会丢行。
+    /// </summary>
     internal static void Log(string message)
     {
         try
         {
-            var path = Path.Combine(Path.GetTempPath(), "ExplorerDock.alttab.log");
-            var info = new FileInfo(path);
-            if (info.Exists && info.Length > 200_000) return;
+            lock (LogGate)
+            {
+                var path = Path.Combine(Path.GetTempPath(), LogFileName);
+                var info = new FileInfo(path);
+                if (info.Exists && info.Length > 200_000) return;
 
-            File.AppendAllText(path, $"{DateTime.Now:HH:mm:ss.fff} {message}{Environment.NewLine}");
+                File.AppendAllText(path, $"{DateTime.Now:HH:mm:ss.fff} {message}{Environment.NewLine}");
+            }
         }
         catch
         {
@@ -69,73 +85,51 @@ internal sealed class AltTabController : IDisposable
         }
     }
 
+    private static readonly object LogGate = new();
+
+    private static readonly string LogFileName =
+        Environment.GetCommandLineArgs().Any(a => a.Equals("--host", StringComparison.OrdinalIgnoreCase))
+            ? "ExplorerDock.host.log"
+            : "ExplorerDock.alttab.log";
+
     /// <summary>立刻收起面板（关掉接管开关、程序退出时用）。</summary>
     public void CancelNow() => Post(Cancel);
 
-    // ---------- 钩子线程 ----------
+    // ---------- 按键动作（由提权进程里的钩子推过来） ----------
 
-    private bool OnKey(KeyStroke stroke)
+    /// <summary>
+    /// 键盘接管发生在提权进程那边，这里只做界面该做的事：
+    /// 弹面板 / 移动选中 / 提交切换 / 取消。
+    /// </summary>
+    private void OnKeyAction(string action)
     {
-        try
+        switch (action)
         {
-            if (!App.Settings.AltTabTakeover) return false;
+            case HostProtocol.KeyAdvance:
+                Post(() => Advance(1));
+                break;
 
-            switch (stroke.Vk)
-            {
-                case KeyboardHook.VK_LSHIFT:
-                case KeyboardHook.VK_RSHIFT:
-                    _shiftDown = stroke.Down;
-                    return false;
+            case HostProtocol.KeyAdvanceBack:
+                Post(() => Advance(-1));
+                break;
 
-                case KeyboardHook.VK_LMENU:
-                case KeyboardHook.VK_RMENU:
-                    _altDown = stroke.Down;
+            case HostProtocol.KeyAdvanceProcess:
+                Post(() => AdvanceInProcess(1));
+                break;
 
-                    // Alt 单独按下必须放行，否则 Alt 菜单、Alt+Space 全废
-                    if (stroke.Down) return false;
-                    if (!_active && !_opening) return false;
+            case HostProtocol.KeyAdvanceProcessBack:
+                Post(() => AdvanceInProcess(-1));
+                break;
 
-                    // 我们要吞掉这个"Alt 抬起"，可物理键盘状态得让它闭合，
-                    // 否则 Alt 会一直卡在按下状态 —— 表现就是之后打字全变快捷键、按键错乱。
-                    // 补发必须在这里做：UI 那条路上有好几个提前返回的分支（切回原窗口、列表为空、
-                    // 正在数窗口……），从那儿溜走就再没人补发了。补发事件带 INJECTED 标志，不会再进本钩子。
-                    NativeMethods.RestoreAltKeyState();
+            case HostProtocol.KeyCommit:
+                Post(Commit);
+                break;
 
-                    // 只吞键、不动 _active：真正的收尾交给 UI 线程的 Commit 做。
-                    // （在这里置 false 的话，Commit 一看"面板没开"就直接早退了，面板永远关不掉）
-                    Post(Commit);
-                    return true;
-
-                case KeyboardHook.VK_TAB:
-                    // Alt 的状态优先信自己跟踪的：注入或远程使用场景下 flags 未必带 ALTDOWN
-                    if (!(stroke.AltDown || _altDown) && !_active) return false;   // 单独按 Tab 与我们无关
-
-                    // 全屏应用（游戏等）在前台时可以选择让系统自己处理，免得用户切不出来
-                    if (stroke.Down && !_active
-                        && App.Settings.AltTabFullscreenPassthrough
-                        && IsForegroundFullscreen())
-                    {
-                        return false;
-                    }
-
-                    if (stroke.Down) Post(Advance);
-                    return true;   // 抬起也吞：别让前台窗口收到半个组合键
-
-                case KeyboardHook.VK_ESCAPE:
-                    if (!stroke.Down || !_active) return false;
-
-                    _cancelPending = true;
-                    Post(Cancel);
-                    return true;
-
-                default:
-                    return false;
-            }
-        }
-        catch
-        {
-            // 钩子里出任何岔子都当没接管，绝不能影响键盘
-            return false;
+            case HostProtocol.KeyCancel:
+                // 先置位再排队：窗口列表还在后台数的时候也要能取消掉
+                _cancelPending = true;
+                Post(Cancel);
+                break;
         }
     }
 
@@ -151,32 +145,62 @@ internal sealed class AltTabController : IDisposable
         }
     }
 
+    /// <summary>把"界面是否正在接管中"告诉提权进程 —— 钩子要靠它判断 Alt 抬起怎么处理。</summary>
+    private void SyncKeyState() => _app.PushKeyState();
+
     // ---------- UI 线程 ----------
 
-    private void Advance()
+    /// <summary>方向由钩子那边定（Shift 的状态只有它知道）：+1 往后，-1 往前。</summary>
+    private void Advance(int delta)
     {
         if (_opening)
         {
             // 窗口列表还没数完，先把这次按键记下来
-            _pendingTabs += _shiftDown ? -1 : 1;
+            _pendingTabs += delta;
             return;
         }
 
         if (!_active)
         {
-            Open();
+            Open(false);
             return;
         }
 
-        Move(_shiftDown ? -1 : 1);
+        Move(delta);
     }
 
-    private void Open()
+    /// <summary>Alt+~：在同一个进程名的窗口之间切换。</summary>
+    private void AdvanceInProcess(int delta)
+    {
+        if (_opening)
+        {
+            // 窗口列表还没数完，先把这次按键记下来
+            _pendingTabs += delta;
+            return;
+        }
+
+        if (!_active)
+        {
+            Open(true);
+            return;
+        }
+
+        // 面板已经开着：跟 Tab 一样只在当前这份列表里移动，不中途换列表
+        Move(delta);
+    }
+
+    /// <summary>
+    /// 打开切换面板。
+    /// currentProcessOnly = true 时列表只含"当前前台窗口所属进程"的窗口（Alt+~）。
+    /// </summary>
+    private void Open(bool currentProcessOnly)
     {
         _opening = true;
+        SyncKeyState();
         _pendingTabs = 0;
         _cancelPending = false;
         _commitPending = false;
+        _processScoped = currentProcessOnly;
         _originForeground = NativeMethods.GetForegroundWindow();
 
         var foreground = _originForeground;
@@ -187,8 +211,9 @@ internal sealed class AltTabController : IDisposable
 
             try
             {
-                items = AltTabWindowList.Snapshot();
-                foreach (var item in items) item.Icon = ShellInterop.GetWindowIcon(item.Handle);
+                items = currentProcessOnly
+                    ? _app.WindowHost.ProcessCards(foreground)
+                    : _app.WindowHost.SnapshotCards();
             }
             catch
             {
@@ -210,13 +235,18 @@ internal sealed class AltTabController : IDisposable
     {
         _opening = false;
 
+        bool processScoped = _processScoped;
+        _processScoped = false;
+
         bool cancelled = _cancelPending;
         _cancelPending = false;
 
-        if (cancelled || items.Count == 0)
+        // Alt+~ 而当前进程只有一个窗口：没有可切换的目标，连面板都不用弹
+        if (cancelled || items.Count == 0 || (processScoped && items.Count < 2))
         {
             _commitPending = false;
             _pendingTabs = 0;
+            SyncKeyState();
             return;
         }
 
@@ -230,7 +260,7 @@ internal sealed class AltTabController : IDisposable
             _items = items;
 
             int target = Wrap(InitialIndex(items, foreground) + pending, items.Count);
-            Activate(items[target].Handle);
+            Activate(items[target].Handle, items[target].TabIndex);
             return;
         }
 
@@ -240,6 +270,7 @@ internal sealed class AltTabController : IDisposable
 
         // 先置位再弹：否则紧接着的 Tab 会以为面板还没开，又走一遍 Open
         _active = true;
+        SyncKeyState();
 
         EnsureOverlay().Present(items, _index);
         StartThumbnails();
@@ -275,8 +306,12 @@ internal sealed class AltTabController : IDisposable
         _active = false;
         _commitPending = false;
         _pendingTabs = 0;
+        _dragHoverIndex = -1;
+        SyncKeyState();
 
-        var target = _index >= 0 && _index < _items.Count ? _items[_index].Handle : IntPtr.Zero;
+        var item = _index >= 0 && _index < _items.Count ? _items[_index] : null;
+        var target = item?.Handle ?? IntPtr.Zero;
+        int tabIndex = item?.TabIndex ?? -1;
 
         StopThumbnails();
         _overlay?.Dismiss();
@@ -287,9 +322,10 @@ internal sealed class AltTabController : IDisposable
         var foreground = NativeMethods.GetForegroundWindow();
         if (foreground != _originForeground && !IsSelf(foreground)) return;
 
-        if (target == foreground) return;   // Tab 转了一圈又回到原窗口
+        // Tab 转了一圈又回到原窗口、而且就是当前那个标签页
+        if (target == foreground && tabIndex < 0) return;
 
-        Activate(target);
+        Activate(target, tabIndex);
     }
 
     private void Cancel()
@@ -305,6 +341,8 @@ internal sealed class AltTabController : IDisposable
         _active = false;
         _cancelPending = false;
         _pendingTabs = 0;
+        _dragHoverIndex = -1;
+        SyncKeyState();
 
         StopThumbnails();
         _overlay?.Dismiss();
@@ -312,18 +350,93 @@ internal sealed class AltTabController : IDisposable
 
     private void OnHovered(int index) => MoveTo(index);
 
+    /// <summary>
+    /// 屏幕坐标落在哪张卡上：拖放落点判定（悬浮栏那边问 DockWindow.TryGetItemAt）。
+    ///
+    /// 返回的句柄就是"这张卡会切过去的窗口"—— 合并卡取的是组内 Z 序最前的那一个，
+    /// 也就是这个程序最后活动过的窗口，正是粘贴该去的地方。
+    /// </summary>
+    public bool TryGetCardAt(int screenX, int screenY, out IntPtr hwnd, out int tabIndex)
+    {
+        hwnd = IntPtr.Zero;
+        tabIndex = -1;
+
+        if (!_active || _overlay is null) return false;
+        if (!_overlay.TryGetCardAt(screenX, screenY, out int index)) return false;
+        if (index < 0 || index >= _items.Count) return false;
+
+        var item = _items[index];
+
+        hwnd = item.Handle;
+        tabIndex = item.TabIndex;
+
+        return hwnd != IntPtr.Zero;
+    }
+
+    /// <summary>
+    /// 拖着内容悬停在某张卡上：把那张卡对应的窗口切到前台（与悬浮栏按钮的悬停呼出同一个行为）。
+    ///
+    /// 只切窗口、不切标签页：拖放悬停触发得很密，切标签走 UI Automation 会拖慢拖动；
+    /// 真正落到卡片上时（<see cref="OnCardDropped"/>）才切到这张卡的那个标签页。
+    /// 面板本身是 WS_EX_NOACTIVATE，不会被激活，也就不存在"面板和窗口抢前台"。
+    /// </summary>
+    private void OnCardDragHovered(int index)
+    {
+        if (!_active || index < 0 || index >= _items.Count) return;
+        if (_dragHoverIndex == index) return;
+
+        var item = _items[index];
+        if (item.Handle == IntPtr.Zero) return;
+
+        _dragHoverIndex = index;
+
+        Log($"card drag hover -> activate hwnd=0x{item.Handle.ToInt64():X}");
+        _app.WindowHost.Activate(item.Handle, -1);
+    }
+
+    /// <summary>
+    /// 拖着内容落到某张卡上：写进系统剪贴板（不进本软件的剪贴板历史）→ 粘到那张卡的窗口。
+    ///
+    /// 故意**不收起面板**：面板由"松开 Alt"驱动关闭（用户要求拖放期间别把它关掉），
+    /// 而且这时目标窗口已经被悬停激活过，前台是对的。
+    /// </summary>
+    private void OnCardDropped(int index, System.Windows.IDataObject data)
+    {
+        if (!_active || index < 0 || index >= _items.Count) return;
+
+        var item = _items[index];
+        if (item.Handle == IntPtr.Zero) return;
+
+        _dragHoverIndex = -1;
+
+        bool written = _app.WriteDroppedDataToClipboard(data);
+
+        if (!written)
+        {
+            Log($"card drop: clipboard write failed (index={index})");
+            return;
+        }
+
+        Log($"card drop -> paste hwnd=0x{item.Handle.ToInt64():X} tab={item.TabIndex}");
+        WindowPaste.Deliver(_app, item.Handle, item.TabIndex);
+    }
+
     private void OnClicked(int index)
     {
         MoveTo(index);
         Commit();
     }
 
-    private void Activate(IntPtr hwnd)
+    private void Activate(IntPtr hwnd, int tabIndex)
     {
         if (!NativeMethods.IsWindow(hwnd)) return;
 
-        NativeMethods.ForceForeground(hwnd);
-        NativeMethods.RestoreAltKeyState();
+        // 激活窗口（必要时切标签页）交给窗口宿主：活动窗口是管理员程序时，
+        // 不提权这一步会直接失效
+        _app.WindowHost.Activate(hwnd, tabIndex);
+
+        // 这个补发也得由提权进程发，否则管理员窗口收不到、Alt 会卡在按下状态
+        _app.WindowHost.RestoreAltKey();
     }
 
     // ---------- 缩略图 ----------
@@ -345,7 +458,14 @@ internal sealed class AltTabController : IDisposable
         {
             if (!_active || _overlay is null) return;
 
-            _thumbnailHost ??= new AltTabThumbnailHost();
+            if (_thumbnailHost is null)
+            {
+                _thumbnailHost = new AltTabThumbnailHost
+                {
+                    DragOverForward = e => _overlay?.ForwardDragOver(e),
+                    DropForward = e => _overlay?.ForwardDrop(e),
+                };
+            }
 
             var slots = _overlay.GetThumbnailSlots();
 
@@ -360,6 +480,35 @@ internal sealed class AltTabController : IDisposable
     }
 
     private void StopThumbnails() => _thumbnailHost?.Hide();
+
+    // ---------- 面板滚动 ----------
+
+    private readonly object _scrollGate = new();
+    private Timer? _scrollTimer;
+
+    /// <summary>
+    /// 面板滚动了。DWM 缩略图贴的是屏幕坐标，不会跟着 WPF 滚动走，
+    /// 所以先把它们收掉（免得错位），停手 80ms 之后再按新的位置重挂一遍。
+    /// </summary>
+    private void OnScrolled()
+    {
+        StopThumbnails();
+
+        lock (_scrollGate)
+        {
+            _scrollTimer?.Dispose();
+            _scrollTimer = new Timer(_ => Post(StartThumbnails), null, 80, Timeout.Infinite);
+        }
+    }
+
+    private void StopScrollTimer()
+    {
+        lock (_scrollGate)
+        {
+            _scrollTimer?.Dispose();
+            _scrollTimer = null;
+        }
+    }
 
     /// <summary>
     /// 缩略图留边处的底色。
@@ -397,18 +546,29 @@ internal sealed class AltTabController : IDisposable
         _overlay = new AltTabOverlay();
         _overlay.Hovered += OnHovered;
         _overlay.Clicked += OnClicked;
+        _overlay.Scrolled += OnScrolled;
+        _overlay.Dropped += OnCardDropped;
+        _overlay.DragHovered += OnCardDragHovered;
         _overlay.Preload();
         return _overlay;
     }
 
     private static int InitialIndex(IReadOnlyList<AltTabWindowInfo> items, IntPtr foreground)
     {
-        // 列表是 Z 序，当前窗口通常是第 0 个；系统默认选中"上一个用过的窗口"，
-        // 也就是当前窗口的下一个
+        // 列表是 Z 序，当前窗口通常是第 0 项；系统默认选中"上一个用过的窗口"，
+        // 也就是当前项的下一个。多标签窗口还要认到"现在显示的是哪个标签页"。
+        int sameWindow = -1;
+
         for (int i = 0; i < items.Count; i++)
         {
-            if (items[i].Handle == foreground) return (i + 1) % items.Count;
+            if (items[i].Handle != foreground) continue;
+
+            if (sameWindow < 0) sameWindow = i;
+
+            if (items[i].TabIndex < 0 || items[i].TabSelected) return (i + 1) % items.Count;
         }
+
+        if (sameWindow >= 0) return (sameWindow + 1) % items.Count;
 
         return 0;
     }
@@ -429,26 +589,6 @@ internal sealed class AltTabController : IDisposable
         return (int)pid == Environment.ProcessId;
     }
 
-    private static bool IsForegroundFullscreen()
-    {
-        try
-        {
-            var hwnd = NativeMethods.GetForegroundWindow();
-            if (hwnd == IntPtr.Zero) return false;
-            if (!NativeMethods.TryGetMonitorRect(hwnd, out var monitor)) return false;
-            if (!NativeMethods.GetWindowRect(hwnd, out var bounds)) return false;
-
-            return bounds.Left <= monitor.Left + 1
-                && bounds.Top <= monitor.Top + 1
-                && bounds.Right >= monitor.Right - 1
-                && bounds.Bottom >= monitor.Bottom - 1;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
     public void Dispose()
     {
         try
@@ -458,6 +598,7 @@ internal sealed class AltTabController : IDisposable
             _cancelPending = true;
             _commitPending = false;
 
+            StopScrollTimer();
             StopThumbnails();
             _overlay?.Dismiss();
         }
@@ -468,8 +609,8 @@ internal sealed class AltTabController : IDisposable
 
         try
         {
-            _thumbnailHost?.Dispose();
-            _thumbnailHost = null;
+            // 钩子在提权进程那边，这里只要退订
+            _app.WindowHost.KeyAction -= OnKeyAction;
         }
         catch
         {
@@ -478,7 +619,8 @@ internal sealed class AltTabController : IDisposable
 
         try
         {
-            _hook.Dispose();
+            _thumbnailHost?.Dispose();
+            _thumbnailHost = null;
         }
         catch
         {

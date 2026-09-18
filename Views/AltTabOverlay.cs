@@ -16,17 +16,29 @@ namespace ExplorerDock.Views;
 /// 它是 WS_EX_NOACTIVATE 且 ShowActivated=false 的：**绝不抢前台焦点**。
 /// 一旦它把自己激活了，用户松开 Alt 时前台已经变成我们自己，
 /// "切到哪个窗口"就无从谈起；鼠标点击也照样能收到，不需要焦点。
+///
+/// 卡片尺寸恒定、面板不整体缩放：放不下就垂直滚动（面板外轮廓不因为卡片变大而变大）。
 /// </summary>
 internal sealed class AltTabOverlay : Window
 {
-    private const double CardWidth = 236;
-    private const double CardHeight = 178;
+    private const double CardWidth = 300;
+    private const double CardHeight = 226;
     private const double CardGap = 12;
-    private const int MaxPerRow = 5;
+
+    /// <summary>一行最多几张卡。卡片放大后取 4，面板宽度才和改动前基本一致。</summary>
+    private const int MaxPerRow = 4;
+
+    /// <summary>合并卡里最多摆几个窗口（3×3）；更多的用角标显示总数，靠 Alt+~ 切换。</summary>
+    private const int MaxGridCells = 9;
+
+    /// <summary>一次最多挂多少个实时缩略图，防止窗口特别多时开销失控。</summary>
+    private const int MaxThumbnailSlots = 60;
+
     private const double PanelPadding = 20;
 
     private readonly Border _panel;
     private readonly WrapPanel _wrap;
+    private readonly ScrollViewer _scroll;
     private readonly List<CardVisual> _cards = new();
 
     private ThemePalette _palette = ThemePalette.Resolve();
@@ -43,6 +55,7 @@ internal sealed class AltTabOverlay : Window
     private Brush _textBrush = Brushes.White;
     private Brush _onActiveTextBrush = Brushes.White;
     private Brush _thumbBack = Brushes.Transparent;
+    private Brush _chipBrush = Brushes.Transparent;
 
     public AltTabOverlay()
     {
@@ -62,14 +75,26 @@ internal sealed class AltTabOverlay : Window
             ItemHeight = CardHeight + CardGap,
         };
 
+        _scroll = new ScrollViewer
+        {
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            CanContentScroll = false,
+            Focusable = false,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            Content = _wrap,
+        };
+
+        // 滚动时要重新摆缩略图（DWM 缩略图贴的是屏幕坐标，不跟着 WPF 滚动走）
+        _scroll.ScrollChanged += (_, _) => Scrolled?.Invoke();
+
         FontFamily = _palette.Typeface;
 
         _panel = new Border
         {
             CornerRadius = new CornerRadius(_palette.CornerRadius),
             BorderThickness = new Thickness(_palette.Custom ? _palette.CustomBorderThickness : _palette.DockBorderThickness),
-            Padding = new Thickness(PanelPadding),
-            Child = _wrap,
+            Child = _scroll,
             Effect = new DropShadowEffect
             {
                 BlurRadius = _palette.ShadowBlur,
@@ -83,6 +108,11 @@ internal sealed class AltTabOverlay : Window
 
         Content = _panel;
         Title = "ExplorerDock";
+
+        // 接收系统拖放：从别的程序把内容拖到某张卡上 → 粘到那张卡对应的窗口
+        AllowDrop = true;
+        DragOver += OnCardDragOver;
+        Drop += OnCardDrop;
     }
 
     /// <summary>鼠标移到某张卡上（系统行为：悬停即选中）。</summary>
@@ -90,6 +120,23 @@ internal sealed class AltTabOverlay : Window
 
     /// <summary>鼠标点了某张卡（系统行为：点一下立即切过去）。</summary>
     public event Action<int>? Clicked;
+
+    /// <summary>面板滚动了（控制器据此重新摆一遍缩略图）。</summary>
+    public event Action? Scrolled;
+
+    /// <summary>
+    /// 拖放悬停在某张卡上：控制器据此把那张卡的窗口切到前台 ——
+    /// 和悬浮栏按钮"拖动经过就把窗口呼出来"是同一个行为，让用户在松手前就看得见目标窗口。
+    ///
+    /// 面板自己不抢前台（WS_EX_NOACTIVATE），所以被激活的始终是目标窗口。
+    /// </summary>
+    public event Action<int>? DragHovered;
+
+    /// <summary>
+    /// 拖放落在某张卡上（index = 卡片序号，data = 拖来的数据）。
+    /// 由控制器决定粘到哪个窗口并收起面板 —— 面板自己不知道卡片对应的是哪个句柄。
+    /// </summary>
+    public event Action<int, IDataObject>? Dropped;
 
     /// <summary>预热窗口句柄：省掉第一次弹出时的窗口初始化开销（不显示，所以不会闪）。</summary>
     public void Preload() => new WindowInteropHelper(this).EnsureHandle();
@@ -116,35 +163,40 @@ internal sealed class AltTabOverlay : Window
         BuildCards(items);
         ApplyTone();
 
-        int columns = Math.Clamp(items.Count, 1, MaxPerRow);
-        int rows = Math.Max(1, (int)Math.Ceiling(items.Count / (double)columns));
-
         // 外框粗细跟悬浮栏/剪贴板面板一致，尺寸里也要按实际值预留，否则面板会差几个像素
         double border = _palette.Custom ? _palette.CustomBorderThickness : _palette.DockBorderThickness;
+        double chrome = PanelPadding * 2 + border * 2;
 
-        double panelWidth = columns * (CardWidth + CardGap) + PanelPadding * 2 + border * 2;
-        double panelHeight = rows * (CardHeight + CardGap) + PanelPadding * 2 + border * 2;
+        // 滚动条的位置一直预留出来：它出现/消失时不会把每行挤成少一张卡
+        double reserve = SystemParameters.VerticalScrollBarWidth;
 
         var area = SystemParameters.WorkArea;
-        double maxHeight = area.Height * 0.78;
         double maxWidth = area.Width * 0.94;
+        double maxHeight = area.Height * 0.78;
 
-        // 窗口太多时整体缩小（系统也是这么做的），而不是溢出屏幕
-        double scale = 1;
-        if (panelHeight > maxHeight || panelWidth > maxWidth)
-        {
-            scale = Math.Max(0.4, Math.Min(maxHeight / panelHeight, maxWidth / panelWidth));
-        }
+        // 列数：既不超过 MaxPerRow，也不超过屏幕放得下的数量
+        int fit = (int)((maxWidth - chrome - reserve) / (CardWidth + CardGap));
+        int columns = Math.Clamp(items.Count, 1, Math.Max(1, Math.Min(MaxPerRow, fit)));
+        int rows = Math.Max(1, (int)Math.Ceiling(items.Count / (double)columns));
 
-        _panel.LayoutTransform = new ScaleTransform(scale, scale);
+        double scrollWidth = columns * (CardWidth + CardGap) + reserve;
+        double scrollHeight = Math.Min(rows * (CardHeight + CardGap), Math.Max(CardHeight, maxHeight - chrome));
 
-        double width = Math.Round(panelWidth * scale);
-        double height = Math.Round(panelHeight * scale);
+        _scroll.Width = scrollWidth;
+        _scroll.Height = scrollHeight;
+
+        // 右内边距减掉预留的滚动条宽度，左右留白看上去才一样宽
+        _panel.Padding = new Thickness(PanelPadding, PanelPadding, Math.Max(0, PanelPadding - reserve), PanelPadding);
+
+        double width = Math.Round(chrome + scrollWidth);
+        double height = Math.Round(chrome + scrollHeight);
 
         Width = width;
         Height = height;
         Left = Math.Round(area.Left + (area.Width - width) / 2);
         Top = Math.Round(area.Top + Math.Max(0, (area.Height - height) / 2 - area.Height * 0.05));
+
+        _scroll.ScrollToTop();
 
         if (!IsVisible) Show();
         KeepOnTop();
@@ -157,43 +209,51 @@ internal sealed class AltTabOverlay : Window
 
         for (int i = 0; i < _cards.Count; i++)
         {
-            _cards[i].Apply(_cardNormal, _cardSelected, _selectedBorderBrush, _textBrush, _onActiveTextBrush, _thumbBack, i == index);
+            _cards[i].Apply(_cardNormal, _cardSelected, _selectedBorderBrush, _textBrush, _onActiveTextBrush, _thumbBack, _chipBrush, i == index);
         }
     }
 
     /// <summary>
-    /// 每张卡的缩略图区域（屏幕物理像素）+ 对应的源窗口句柄，交给缩略图宿主去挂 DWM 缩略图。
-    /// 必须在面板已经显示、布局算完之后调用。
+    /// 每张卡里每个预览格的屏幕物理像素矩形 + 对应的源窗口句柄，交给缩略图宿主挂 DWM 缩略图。
+    /// 必须在面板已经显示、布局算完之后调用；滚出可视区的格子不收集（省掉没必要的注册）。
     /// </summary>
     public List<ThumbnailSlot> GetThumbnailSlots()
     {
-        var slots = new List<ThumbnailSlot>(_cards.Count);
+        var slots = new List<ThumbnailSlot>();
+        if (_cards.Count == 0) return slots;
+
+        var visible = VisibleBounds();
 
         foreach (var card in _cards)
         {
-            if (card.Handle == IntPtr.Zero) continue;
-
-            var host = card.ThumbHost;
-
-            if (host.ActualWidth <= 2 || host.ActualHeight <= 2) continue;
-
-            try
+            foreach (var cell in card.Cells)
             {
-                var topLeft = host.PointToScreen(new Point(0, 0));
-                var bottomRight = host.PointToScreen(new Point(host.ActualWidth, host.ActualHeight));
+                if (slots.Count >= MaxThumbnailSlots) return slots;
+                if (cell.Handle == IntPtr.Zero) continue;
 
-                int width = (int)Math.Round(bottomRight.X - topLeft.X);
-                int height = (int)Math.Round(bottomRight.Y - topLeft.Y);
+                var element = cell.Element;
+                if (element.ActualWidth <= 2 || element.ActualHeight <= 2) continue;
 
-                if (width <= 2 || height <= 2) continue;
+                try
+                {
+                    var topLeft = element.PointToScreen(new Point(0, 0));
+                    var bottomRight = element.PointToScreen(new Point(element.ActualWidth, element.ActualHeight));
 
-                slots.Add(new ThumbnailSlot(
-                    card.Handle,
-                    new Int32Rect((int)Math.Round(topLeft.X), (int)Math.Round(topLeft.Y), width, height)));
-            }
-            catch
-            {
-                // 布局还没算完，这张先跳过
+                    int width = (int)Math.Round(bottomRight.X - topLeft.X);
+                    int height = (int)Math.Round(bottomRight.Y - topLeft.Y);
+
+                    if (width <= 2 || height <= 2) continue;
+
+                    var rect = new Int32Rect((int)Math.Round(topLeft.X), (int)Math.Round(topLeft.Y), width, height);
+
+                    if (visible is { } area && !Intersects(rect, area)) continue;
+
+                    slots.Add(new ThumbnailSlot(cell.Handle, rect));
+                }
+                catch
+                {
+                    // 布局还没算完，这一格先跳过
+                }
             }
         }
 
@@ -203,6 +263,79 @@ internal sealed class AltTabOverlay : Window
     public void Dismiss()
     {
         if (IsVisible) Hide();
+    }
+
+    /// <summary>
+    /// 缩略图层收到拖放时转过来：命中判定仍走面板自己的卡片矩形
+    /// （坐标取的是全局光标位置，跟事件来自哪个窗口无关）。
+    /// </summary>
+    public void ForwardDragOver(DragEventArgs e) => OnCardDragOver(this, e);
+
+    /// <summary>见 <see cref="ForwardDragOver"/>。</summary>
+    public void ForwardDrop(DragEventArgs e) => OnCardDrop(this, e);
+
+    /// <summary>
+    /// 屏幕坐标落在哪张卡上（拖放落点判定）。
+    /// 用屏幕坐标判：卡片滚出可视区时它的屏幕矩形也在面板外，天然不会命中。
+    /// </summary>
+    public bool TryGetCardAt(int screenX, int screenY, out int index)
+    {
+        index = -1;
+
+        if (!IsVisible) return false;
+
+        for (int i = 0; i < _cards.Count; i++)
+        {
+            var root = _cards[i].Root;
+
+            try
+            {
+                if (!root.IsVisible || root.ActualWidth <= 0 || root.ActualHeight <= 0) continue;
+
+                var topLeft = root.PointToScreen(new Point(0, 0));
+                var bottomRight = root.PointToScreen(new Point(root.ActualWidth, root.ActualHeight));
+
+                if (screenX < topLeft.X || screenX > bottomRight.X) continue;
+                if (screenY < topLeft.Y || screenY > bottomRight.Y) continue;
+
+                index = i;
+                return true;
+            }
+            catch
+            {
+                // 布局还没算完，跳过这张卡
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// 拖着东西悬停在卡片上：回"可放下"的光标，并把这颗卡选中（给用户一个明确的目标提示）。
+    /// </summary>
+    private void OnCardDragOver(object sender, DragEventArgs e)
+    {
+        e.Handled = true;
+        e.Effects = DragDropEffects.None;
+
+        if (!WindowPaste.CanPaste(e.Data)) return;
+
+        if (!NativeMethods.GetCursorPos(out var point)) return;
+        if (!TryGetCardAt(point.X, point.Y, out int index)) return;
+
+        e.Effects = DragDropEffects.Copy;
+        Hovered?.Invoke(index);
+        DragHovered?.Invoke(index);
+    }
+
+    private void OnCardDrop(object sender, DragEventArgs e)
+    {
+        e.Handled = true;
+
+        if (!NativeMethods.GetCursorPos(out var point)) return;
+        if (!TryGetCardAt(point.X, point.Y, out int index)) return;
+
+        Dropped?.Invoke(index, e.Data);
     }
 
     private void KeepOnTop()
@@ -216,6 +349,32 @@ internal sealed class AltTabOverlay : Window
             0, 0, 0, 0,
             NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW);
     }
+
+    /// <summary>面板可视区的屏幕物理像素矩形（用来判断哪些格子还看得见）。</summary>
+    private Int32Rect? VisibleBounds()
+    {
+        if (_scroll.ActualWidth <= 2 || _scroll.ActualHeight <= 2) return null;
+
+        try
+        {
+            var topLeft = _scroll.PointToScreen(new Point(0, 0));
+            var bottomRight = _scroll.PointToScreen(new Point(_scroll.ActualWidth, _scroll.ActualHeight));
+
+            return new Int32Rect(
+                (int)Math.Round(topLeft.X),
+                (int)Math.Round(topLeft.Y),
+                (int)Math.Round(bottomRight.X - topLeft.X),
+                (int)Math.Round(bottomRight.Y - topLeft.Y));
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool Intersects(Int32Rect a, Int32Rect b)
+        => a.X < b.X + b.Width && b.X < a.X + a.Width
+        && a.Y < b.Y + b.Height && b.Y < a.Y + a.Height;
 
     // ---------- 卡片 ----------
 
@@ -252,39 +411,55 @@ internal sealed class AltTabOverlay : Window
             TextTrimming = TextTrimming.CharacterEllipsis,
         };
 
+        // 角标：合并卡显示一共几个窗口（卡里最多摆 9 个，多出来的靠角标看出来）
+        Border? badge = null;
+        TextBlock? badgeText = null;
+
+        if (info.GroupCount > 1)
+        {
+            badgeText = new TextBlock
+            {
+                Text = info.GroupCount.ToString(),
+                FontSize = _palette.FontSizeSmall,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+
+            badge = new Border
+            {
+                CornerRadius = new CornerRadius(_palette.ItemCornerRadius),
+                Padding = new Thickness(6, 1, 6, 1),
+                Margin = new Thickness(6, 0, 0, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+                Child = badgeText,
+            };
+        }
+
         var header = new Grid { Margin = new Thickness(9, 7, 9, 5) };
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         header.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        header.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         Grid.SetColumn(icon, 0);
         Grid.SetColumn(title, 1);
         header.Children.Add(icon);
         header.Children.Add(title);
 
-        // 缩略图由 DWM 实时渲染后盖在这块区域上；拿不到缩略图的窗口就显示大图标
-        var fallback = new Image
+        if (badge is not null)
         {
-            Source = info.Icon,
-            Width = 48,
-            Height = 48,
-            Stretch = Stretch.Uniform,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center,
-        };
+            Grid.SetColumn(badge, 2);
+            header.Children.Add(badge);
+        }
 
-        var thumbHost = new Grid
-        {
-            Margin = new Thickness(9, 0, 9, 9),
-            ClipToBounds = true,
-        };
-        thumbHost.Children.Add(fallback);
+        // 预览区：合并卡按网格摆组内各窗口，普通卡就是一格
+        var cells = new List<ThumbCell>();
+        var preview = BuildPreview(info, cells);
 
         var layout = new Grid();
         layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         layout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
         Grid.SetRow(header, 0);
-        Grid.SetRow(thumbHost, 1);
+        Grid.SetRow(preview, 1);
         layout.Children.Add(header);
-        layout.Children.Add(thumbHost);
+        layout.Children.Add(preview);
 
         var root = new Border
         {
@@ -316,7 +491,69 @@ internal sealed class AltTabOverlay : Window
             e.Handled = true;
         };
 
-        return new CardVisual(info.Handle, root, title, thumbHost);
+        return new CardVisual(info.Handle, root, title, badge, badgeText, cells);
+    }
+
+    /// <summary>
+    /// 预览区网格：n 个窗口排成 ceil(sqrt(n)) 列，最多 3×3 格，顺序就是 Z 序
+    /// （左上角是最后活动过的那个窗口，也就是这张卡真正会切过去的窗口）。
+    /// </summary>
+    private Grid BuildPreview(AltTabWindowInfo info, List<ThumbCell> cells)
+    {
+        var preview = new Grid
+        {
+            Margin = new Thickness(9, 0, 9, 9),
+            ClipToBounds = true,
+        };
+
+        int shown = Math.Min(Math.Max(info.GroupCount, 1), MaxGridCells);
+        int columns = (int)Math.Ceiling(Math.Sqrt(shown));
+        int rows = (int)Math.Ceiling(shown / (double)columns);
+
+        for (int i = 0; i < columns; i++)
+        {
+            preview.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        }
+
+        for (int i = 0; i < rows; i++)
+        {
+            preview.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+        }
+
+        for (int i = 0; i < shown; i++)
+        {
+            // 同一个窗口的多个标签页共用一张画面：只有"窗口当前显示的那个标签页"挂缩略图，
+            // 其余标签页这一格只显示图标（不然几张格子会是同一张图，反而分不清）
+            var showThumbnail = i < info.GroupCount && info.Cells[i].ShowThumbnail;
+            var handle = showThumbnail ? info.Cells[i].Handle : IntPtr.Zero;
+
+            // 缩略图由 DWM 实时渲染后盖在这块区域上；拿不到缩略图的窗口显示大图标
+            var fallback = new Image
+            {
+                Source = info.Icon,
+                Width = 32,
+                Height = 32,
+                Stretch = Stretch.Uniform,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+
+            var cell = new Border
+            {
+                CornerRadius = new CornerRadius(_palette.ThumbCornerRadius),
+                Margin = new Thickness(1.5),
+                ClipToBounds = true,
+                Child = fallback,
+            };
+
+            Grid.SetColumn(cell, i % columns);
+            Grid.SetRow(cell, i / columns);
+            preview.Children.Add(cell);
+
+            cells.Add(new ThumbCell(handle, cell));
+        }
+
+        return preview;
     }
 
     private void ApplyTone()
@@ -342,42 +579,56 @@ internal sealed class AltTabOverlay : Window
         _textBrush = NewBrush(palette.Text.A, palette.Text.R, palette.Text.G, palette.Text.B);
         _onActiveTextBrush = NewBrush(palette.ActiveText.A, palette.ActiveText.R, palette.ActiveText.G, palette.ActiveText.B);
         _thumbBack = NewBrush(palette.ThumbBack.A, palette.ThumbBack.R, palette.ThumbBack.G, palette.ThumbBack.B);
+        _chipBrush = NewBrush(palette.Chip.A, palette.Chip.R, palette.Chip.G, palette.Chip.B);
         Opacity = palette.Opacity;
+
+        // 滚动条用剪贴板面板同一份主题样式
+        ThemeScrollBar.Apply(_scroll, palette.Muted, palette);
 
         for (int i = 0; i < _cards.Count; i++)
         {
-            _cards[i].Apply(_cardNormal, _cardSelected, _selectedBorderBrush, _textBrush, _onActiveTextBrush, _thumbBack, i == _selected);
+            _cards[i].Apply(_cardNormal, _cardSelected, _selectedBorderBrush, _textBrush, _onActiveTextBrush, _thumbBack, _chipBrush, i == _selected);
         }
     }
 
     private static SolidColorBrush NewBrush(byte a, byte r, byte g, byte b) => new(Color.FromArgb(a, r, g, b));
 
+    /// <summary>卡片里的一个预览格：源窗口句柄 + 那个格子的元素。</summary>
+    private readonly record struct ThumbCell(IntPtr Handle, Border Element);
+
     private sealed class CardVisual
     {
         private readonly TextBlock _title;
-        private readonly Grid _thumbHost;
+        private readonly Border? _badge;
+        private readonly TextBlock? _badgeText;
 
-        public CardVisual(IntPtr handle, Border root, TextBlock title, Grid thumbHost)
+        public CardVisual(IntPtr handle, Border root, TextBlock title, Border? badge, TextBlock? badgeText, List<ThumbCell> cells)
         {
             Handle = handle;
             Root = root;
             _title = title;
-            _thumbHost = thumbHost;
+            _badge = badge;
+            _badgeText = badgeText;
+            Cells = cells;
         }
 
         public IntPtr Handle { get; }
 
         public Border Root { get; }
 
-        /// <summary>缩略图区域：DWM 的实时缩略图会盖在这块上（它是宿主窗口，压在面板上面）。</summary>
-        public FrameworkElement ThumbHost => _thumbHost;
+        /// <summary>预览格（合并卡有多个）：DWM 的实时缩略图会盖在这些格子上（宿主窗口压在面板上面）。</summary>
+        public List<ThumbCell> Cells { get; }
 
-        public void Apply(Brush normal, Brush selected, Brush accent, Brush text, Brush onSelectedText, Brush thumbBack, bool isSelected)
+        public void Apply(Brush normal, Brush selected, Brush accent, Brush text, Brush onSelectedText, Brush thumbBack, Brush chip, bool isSelected)
         {
             Root.Background = isSelected ? selected : normal;
             Root.BorderBrush = isSelected ? accent : Brushes.Transparent;
             _title.Foreground = isSelected ? onSelectedText : text;
-            _thumbHost.Background = thumbBack;
+
+            foreach (var cell in Cells) cell.Element.Background = thumbBack;
+
+            if (_badge is not null) _badge.Background = chip;
+            if (_badgeText is not null) _badgeText.Foreground = text;
         }
     }
 }

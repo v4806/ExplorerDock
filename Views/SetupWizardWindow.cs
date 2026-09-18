@@ -14,7 +14,7 @@ namespace ExplorerDock.Views;
 /// </summary>
 internal sealed class SetupWizardWindow : Window
 {
-    private const int LastStep = 4;
+    private const int LastStep = 5;
 
     private readonly App _app;
     private readonly Brush _panelBrush;
@@ -85,8 +85,20 @@ internal sealed class SetupWizardWindow : Window
             body.Children.Add(page);
         }
 
-        Grid.SetRow(body, 1);
-        content.Children.Add(body);
+        // 页面内容放进滚动区：选项加多之后（比如贴边隐藏）矮屏上会被裁掉，
+        // 让它能滚动；没超出时不会出现滚动条，观感与原来一致
+        var bodyScroller = new ScrollViewer
+        {
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+            Focusable = false,
+            Content = body,
+        };
+
+        ThemeScrollBar.Apply(bodyScroller, _palette.Muted, _palette);
+
+        Grid.SetRow(bodyScroller, 1);
+        content.Children.Add(bodyScroller);
 
         // ---- 底部：步骤圆点 + 按钮 ----
         var dots = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
@@ -195,16 +207,28 @@ internal sealed class SetupWizardWindow : Window
         var welcome = new StackPanel();
         welcome.Children.Add(Paragraph("ExplorerDock 把文件夹窗口的按钮从任务栏移到悬浮栏上，任务栏就不会被塞满了。"));
         welcome.Children.Add(Paragraph("点悬浮栏上的按钮，就能切到对应的文件夹窗口。"));
-        welcome.Children.Add(Paragraph("下面 4 步用来设置接管范围、外观和启动方式。"));
+        welcome.Children.Add(Paragraph("下面 5 步用来设置接管范围、外观、剪贴板和启动方式。"));
         yield return welcome;
 
         // 1. 接管范围
         var takeover = new StackPanel();
         takeover.Children.Add(BuildToggle(
             "接管任务栏按钮",
-            "把文件夹窗口的按钮从任务栏移到悬浮栏上。",
+            "把窗口的按钮从任务栏移到悬浮栏上（文件夹窗口一直都在接管范围内）。",
             App.Settings.TakeoverEnabled,
             v => _app.SetTakeover(v)));
+
+        takeover.Children.Add(BuildToggle(
+            "自动接管多窗口程序",
+            "除了文件夹，其他程序也能搬上悬浮栏：同名程序开着 2 个及以上窗口时自动接管。",
+            App.Settings.AutoTakeoverMultiWindow,
+            v => _app.SetAutoTakeoverMultiWindow(v)));
+
+        // 自动接管漏掉的、或者关掉自动接管后只想管某几个程序时，用这份手动名单
+        var pickProcess = BuildButton("选择要接管的程序…", false, () => _app.OpenProcessPicker());
+        pickProcess.HorizontalAlignment = HorizontalAlignment.Left;
+        pickProcess.Margin = new Thickness(0, 2, 0, 14);
+        takeover.Children.Add(pickProcess);
 
         takeover.Children.Add(BuildToggle(
             "接管 Alt+Tab",
@@ -217,13 +241,54 @@ internal sealed class SetupWizardWindow : Window
             "不勾选时，在有些全屏游戏里按 Alt+Tab 可能切不出去（切换界面会被游戏画面挡住）。勾上后这类游戏交给系统处理。",
             App.Settings.AltTabFullscreenPassthrough,
             v => _app.SetAltTabFullscreenPassthrough(v)));
+
+        takeover.Children.Add(new TextBlock
+        {
+            Text = "多窗口合并范围",
+            FontSize = _palette.FontSizeHeadline,
+            Foreground = _textBrush,
+            Margin = new Thickness(2, 14, 0, 10),
+        });
+
+        var scopeGroup = new List<Action<bool>>();
+        var scopeChoices = new StackPanel { Orientation = Orientation.Vertical };
+
+        scopeChoices.Children.Add(BuildRadio(
+            "不合并",
+            App.Settings.AltTabGroupScope == AltTabGroupMode.None,
+            () => _app.SetAltTabGroupScope(AltTabGroupMode.None),
+            scopeGroup));
+
+        scopeChoices.Children.Add(BuildRadio(
+            "只合并悬浮栏接管的程序",
+            App.Settings.AltTabGroupScope == AltTabGroupMode.TakeoverOnly,
+            () => _app.SetAltTabGroupScope(AltTabGroupMode.TakeoverOnly),
+            scopeGroup));
+
+        scopeChoices.Children.Add(BuildRadio(
+            "合并全部同名进程窗口",
+            App.Settings.AltTabGroupScope == AltTabGroupMode.AllProcesses,
+            () => _app.SetAltTabGroupScope(AltTabGroupMode.AllProcesses),
+            scopeGroup));
+
+        takeover.Children.Add(scopeChoices);
+
+        takeover.Children.Add(Paragraph(
+            "同一个程序开着多个窗口时，Alt+Tab 里只占一个位置，用 Alt+~（`/~ 键）在这些窗口之间切换。"
+            + "只合并被悬浮栏接管的程序时，浏览器、Office 这类多窗口程序的切换习惯跟原来一样。"));
         yield return takeover;
 
         // 2. 外观与行为
         var looks = new StackPanel();
         looks.Children.Add(BuildToggle(
-            "没有文件夹时自动隐藏",
-            "没有打开任何文件夹时自动隐藏悬浮栏；打开任意文件夹后自动显示。",
+            "显示悬浮栏",
+            "关掉就整条藏起来，需要时能从右键菜单再打开。",
+            App.Settings.ShowDock,
+            v => _app.SetShowDock(v)));
+
+        looks.Children.Add(BuildToggle(
+            "没有窗口时自动隐藏",
+            "没有任何被接管的窗口时自动隐藏悬浮栏；有窗口后自动显示。",
             App.Settings.HideWhenEmpty,
             v => _app.SetHideWhenEmpty(v)));
 
@@ -237,6 +302,17 @@ internal sealed class SetupWizardWindow : Window
                 App.Settings.Save();
                 _app.RebuildDockItems();
             }));
+
+        looks.Children.Add(BuildToggle(
+            "贴边自动隐藏",
+            "悬浮栏停在屏幕边缘时自动滑出屏幕外；鼠标再回到那条边缘，它就滑回来。",
+            App.Settings.EdgeAutoHide,
+            v => _app.SetEdgeAutoHide(v)));
+
+        var edgeButton = BuildButton("贴边隐藏设置…", false, () => _app.OpenEdgeHideSettings());
+        edgeButton.HorizontalAlignment = HorizontalAlignment.Left;
+        edgeButton.Margin = new Thickness(0, 12, 0, 0);
+        looks.Children.Add(edgeButton);
 
         looks.Children.Add(new TextBlock
         {
@@ -260,7 +336,26 @@ internal sealed class SetupWizardWindow : Window
         looks.Children.Add(themeButton);
         yield return looks;
 
-        // 3. 启动设置
+        // 3. 剪贴板
+        var clipboard = new StackPanel();
+
+        clipboard.Children.Add(BuildToggle(
+            "接管 Win+V 剪贴板",
+            "用本软件的剪贴板历史代替系统的 Win+V：能搜索、能收藏，还能拖出来直接粘到窗口上。",
+            App.Settings.ClipboardTakeover,
+            v => _app.SetClipboardTakeover(v)));
+
+        clipboard.Children.Add(Paragraph(
+            "历史保留多少条、最多占多少磁盘、面板出现在哪儿，以及密码 / TPM 保护，都在剪贴板设置里。"));
+
+        var clipboardButton = BuildButton("剪贴板设置…", false, () => _app.OpenClipboardSettings());
+        clipboardButton.HorizontalAlignment = HorizontalAlignment.Left;
+        clipboardButton.Margin = new Thickness(0, 2, 0, 14);
+        clipboard.Children.Add(clipboardButton);
+
+        yield return clipboard;
+
+        // 4. 启动设置
         var startup = new StackPanel();
         startup.Children.Add(BuildToggle(
             "开机自动启动",
@@ -518,7 +613,8 @@ internal sealed class SetupWizardWindow : Window
             0 => ("欢迎使用 ExplorerDock", "按下面几步完成初始设置。"),
             1 => ("接管范围", "选择由 ExplorerDock 接管的功能。"),
             2 => ("外观与行为", "设置悬浮栏的显示方式与配色。"),
-            3 => ("启动设置", "设置开机启动与运行权限。"),
+            3 => ("剪贴板", "设置 Win+V 剪贴板历史。"),
+            4 => ("启动设置", "设置开机启动与运行权限。"),
             _ => ("设置完成", "所有设置之后都可以随时修改。"),
         };
 

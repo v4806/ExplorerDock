@@ -200,36 +200,127 @@ internal static class NativeMethods
     public static extern uint GetCurrentThreadId();
 
     /// <summary>
-    /// 把窗口强制带到前台。Windows 会拦住"非前台进程"抢焦点，
-    /// 这里临时把自己的输入队列挂到当前前台线程上，绕过这个限制。
+    /// 把窗口强制带到前台，并把键盘焦点真的交给它。
+    ///
+    /// Windows 会拦住"非前台进程"抢焦点，这里先走系统 Alt+Tab 用的那条路
+    /// （SwitchToThisWindow：它除切前台之外也会把键盘焦点正确交给目标窗口），
+    /// 不行再用 AttachThreadInput 挂输入队列的兜底办法。
+    ///
+    /// **光切前台是不够的**：窗口到了前台、焦点却还留在原处（或我们自己的窗口）时，
+    /// 切过去直接 Ctrl+V 毫无反应，必须先用鼠标点一下目标窗口内部才行 ——
+    /// 用户实测的正是这个现象，而系统原生 Alt+Tab 切过去就没这问题。
+    /// 焦点是"线程内的概念"，所以 SetFocus 之前必须把当前线程挂到**目标窗口的线程**上。
     /// </summary>
     public static bool ForceForeground(IntPtr hWnd)
     {
         if (IsIconic(hWnd)) ShowWindow(hWnd, SW_RESTORE);
 
-        if (SetForegroundWindow(hWnd) && GetForegroundWindow() == hWnd) return true;
-
-        var foreground = GetForegroundWindow();
-        uint foregroundThread = GetWindowThreadProcessId(foreground, IntPtr.Zero);
-        uint currentThread = GetCurrentThreadId();
-        bool attached = false;
-
+        // 系统 Alt+Tab 的实现：切前台 + 交焦点一次做完（未文档化，但一直可用）
         try
         {
-            if (foregroundThread != 0 && foregroundThread != currentThread)
-            {
-                attached = AttachThreadInput(foregroundThread, currentThread, true);
-            }
-
-            BringWindowToTop(hWnd);
-            SetForegroundWindow(hWnd);
+            SwitchToThisWindow(hWnd, true);
         }
-        finally
+        catch
         {
-            if (attached) AttachThreadInput(foregroundThread, currentThread, false);
+            // 拿不到就算了，下面还有兜底
+        }
+
+        var previousFocus = HandOverFocus(hWnd);
+
+        if (GetForegroundWindow() != hWnd)
+        {
+            var foreground = GetForegroundWindow();
+            uint foregroundThread = GetWindowThreadProcessId(foreground, IntPtr.Zero);
+            uint currentThread = GetCurrentThreadId();
+            bool attached = false;
+
+            try
+            {
+                if (foregroundThread != 0 && foregroundThread != currentThread)
+                {
+                    attached = AttachThreadInput(foregroundThread, currentThread, true);
+                }
+
+                BringWindowToTop(hWnd);
+                SetForegroundWindow(hWnd);
+                HandOverFocus(hWnd);
+            }
+            finally
+            {
+                if (attached) AttachThreadInput(foregroundThread, currentThread, false);
+            }
+        }
+
+        // 留一份诊断：焦点到底进没进目标窗口、这一步是在什么样的线程上做的
+        try
+        {
+            uint targetThread = GetWindowThreadProcessId(hWnd, out _);
+            var (guiActive, guiFocus) = GetThreadGuiState(targetThread);
+
+            LastActivateDiagnostics =
+                $"setFocusPrev=0x{previousFocus.ToInt64():X} active=0x{guiActive.ToInt64():X} " +
+                $"focus=0x{guiFocus.ToInt64():X} fg=0x{GetForegroundWindow().ToInt64():X} " +
+                $"threadHasQueue={IsGuiThread()}";
+        }
+        catch
+        {
+            LastActivateDiagnostics = "诊断失败";
         }
 
         return GetForegroundWindow() == hWnd;
+    }
+
+    /// <summary>最近一次激活的关键结果（谁在前台、焦点进了哪个窗口、调用线程有没有消息队列）。</summary>
+    public static string LastActivateDiagnostics { get; private set; } = string.Empty;
+
+    /// <summary>当前线程有没有消息队列 —— AttachThreadInput / SetFocus 只有在这种线程上才可靠。</summary>
+    private static bool IsGuiThread()
+    {
+        try
+        {
+            var info = new GUITHREADINFO { cbSize = Marshal.SizeOf<GUITHREADINFO>() };
+            return GetGUIThreadInfo(GetCurrentThreadId(), ref info);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    [DllImport("user32.dll")]
+    private static extern void SwitchToThisWindow(IntPtr hWnd, bool fAltTab);
+
+    /// <summary>把键盘焦点交给目标窗口（必要时先挂到它的输入队列上）。返回切换前的焦点窗口。</summary>
+    private static IntPtr HandOverFocus(IntPtr hWnd)
+    {
+        try
+        {
+            uint targetThread = GetWindowThreadProcessId(hWnd, IntPtr.Zero);
+            uint currentThread = GetCurrentThreadId();
+
+            bool attached = false;
+            IntPtr previous = IntPtr.Zero;
+
+            try
+            {
+                if (targetThread != 0 && targetThread != currentThread)
+                {
+                    attached = AttachThreadInput(targetThread, currentThread, true);
+                }
+
+                previous = SetFocus(hWnd);
+            }
+            finally
+            {
+                if (attached) AttachThreadInput(targetThread, currentThread, false);
+            }
+
+            return previous;
+        }
+        catch
+        {
+            return IntPtr.Zero;
+        }
     }
 
     [DllImport("user32.dll", SetLastError = true)]
@@ -312,6 +403,65 @@ internal static class NativeMethods
         var sb = new StringBuilder(256);
         GetClassName(hWnd, sb, sb.Capacity);
         return sb.ToString();
+    }
+
+    // ---------- 进程名（Alt+Tab 同名进程打包用） ----------
+
+    private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint dwDesiredAccess, bool bInheritHandle, uint dwProcessId);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr hObject);
+
+    [DllImport("kernel32.dll", EntryPoint = "QueryFullProcessImageNameW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool QueryFullProcessImageName(IntPtr hProcess, uint dwFlags, StringBuilder lpExeName, ref uint lpdwSize);
+
+    /// <summary>
+    /// 取进程的 exe 文件名（不带扩展名，保留原样大小写），取不到返回空串。
+    ///
+    /// 走 QueryFullProcessImageName：只要"查询有限信息"权限就够，比 Process.MainModule
+    /// 那种要读对方模块的方式稳（提权/非提权都能用），也不会为每个窗口拉一遍进程表。
+    /// </summary>
+    public static string GetProcessName(uint pid)
+        => System.IO.Path.GetFileNameWithoutExtension(GetProcessImagePath(pid));
+
+    /// <summary>
+    /// 取进程 exe 的完整路径，取不到返回空串。
+    ///
+    /// 和 <see cref="GetProcessName"/> 是同一次系统调用：窗口图标要按 exe 路径取，
+    /// 分成两次调用等于每轮枚举给每个窗口多做一遍 OpenProcess。
+    /// </summary>
+    public static string GetProcessImagePath(uint pid)
+    {
+        if (pid == 0) return string.Empty;
+
+        IntPtr handle = IntPtr.Zero;
+
+        try
+        {
+            handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+            if (handle == IntPtr.Zero) return string.Empty;
+
+            var buffer = new StringBuilder(1024);
+            uint size = (uint)buffer.Capacity;
+
+            if (!QueryFullProcessImageName(handle, 0, buffer, ref size)) return string.Empty;
+
+            return buffer.ToString();
+        }
+        catch
+        {
+            return string.Empty;
+        }
+        finally
+        {
+            if (handle != IntPtr.Zero)
+            {
+                try { CloseHandle(handle); } catch { }
+            }
+        }
     }
 
     /// <summary>在 STA 后台线程上泵消息，避免跨进程 COM 调用卡住。</summary>
@@ -561,6 +711,45 @@ internal static class NativeMethods
         catch
         {
             // 点不出去也不该影响粘贴流程
+        }
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct GUITHREADINFO
+    {
+        public int cbSize;
+        public uint flags;
+        public IntPtr hwndActive;
+        public IntPtr hwndFocus;
+        public IntPtr hwndCapture;
+        public IntPtr hwndMenuOwner;
+        public IntPtr hwndMoveSize;
+        public IntPtr hwndCaret;
+        public RECT rcCaret;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetGUIThreadInfo(uint idThread, ref GUITHREADINFO pgui);
+
+    /// <summary>
+    /// 某个线程现在的活动窗口与**焦点窗口**。
+    ///
+    /// 诊断用：切换窗口之后焦点到底落在哪儿（文件列表 / 标签栏 / 地址栏）只能从这里看出来；
+    /// 焦点不在那个线程时返回 0。
+    /// </summary>
+    public static (IntPtr Active, IntPtr Focus) GetThreadGuiState(uint threadId)
+    {
+        try
+        {
+            var info = new GUITHREADINFO { cbSize = Marshal.SizeOf<GUITHREADINFO>() };
+
+            if (!GetGUIThreadInfo(threadId, ref info)) return (IntPtr.Zero, IntPtr.Zero);
+
+            return (info.hwndActive, info.hwndFocus);
+        }
+        catch
+        {
+            return (IntPtr.Zero, IntPtr.Zero);
         }
     }
 

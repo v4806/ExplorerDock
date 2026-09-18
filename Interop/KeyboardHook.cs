@@ -48,6 +48,10 @@ internal sealed class KeyboardHook : IDisposable
 
     public const int VK_TAB = 0x09;
     public const int VK_ESCAPE = 0x1B;
+
+    /// <summary>` / ~ 键（Alt+~ 用来在同一个进程的窗口之间切换）。</summary>
+    public const int VK_OEM_3 = 0xC0;
+
     public const int VK_LMENU = 0xA4;
     public const int VK_RMENU = 0xA5;
     public const int VK_LSHIFT = 0xA0;

@@ -37,10 +37,17 @@ internal sealed class ClipboardSettingsWindow : Window
     private readonly Brush _lineBrush;
     private readonly Brush _ghostBrush;
     private readonly Brush _accentBrush;
+
+    /// <summary>选中项的高亮底色（与悬浮栏的"当前活动按钮"同一份）。</summary>
     private readonly Brush _activeBrush;
 
-    /// <summary>选中态底块上的文字色：由 ThemePalette.OnColor 按高亮色明暗自动反色，和悬浮栏同一套。</summary>
+    /// <summary>选中项上的文字色（与悬浮栏同一套反色规则）。</summary>
     private readonly Brush _onActiveTextBrush;
+
+    /// <summary>未选中项的悬浮高亮（鼠标移上去才出现，与悬浮栏按钮一致）。</summary>
+    private readonly Brush _hoverBrush;
+
+    private readonly Brush _hoverTextBrush;
 
     private int _maxItems;
     private long _maxBytes;
@@ -72,6 +79,8 @@ internal sealed class ClipboardSettingsWindow : Window
         _accentBrush = new SolidColorBrush(palette.Accent);
         _activeBrush = new SolidColorBrush(palette.Active);
         _onActiveTextBrush = new SolidColorBrush(palette.ActiveText);
+        _hoverBrush = new SolidColorBrush(palette.Hover);
+        _hoverTextBrush = new SolidColorBrush(palette.HoverText);
 
         _maxItems = App.Settings.ClipboardMaxItems;
         _maxBytes = App.Settings.ClipboardMaxBytes;
@@ -363,10 +372,13 @@ internal sealed class ClipboardSettingsWindow : Window
 
     private void ApplyChoice(Border button, TextBlock label, bool active)
     {
-        button.Background = active ? _activeBrush : _ghostBrush;
-        button.BorderBrush = active ? _accentBrush : _lineBrush;
-        label.Foreground = active ? _onActiveTextBrush : _mutedBrush;
-        label.FontWeight = active ? FontWeights.SemiBold : FontWeights.Normal;
+        // 与悬浮栏按钮同一套：高亮块**只改底色、不描边**
+        // （底色与描边同色时圆角会画两遍，边缘看着残缺）；文字跟着高亮色反色
+        button.Tag = active;
+
+        button.Background = active ? _activeBrush : Brushes.Transparent;
+        button.BorderBrush = Brushes.Transparent;
+        label.Foreground = active ? _onActiveTextBrush : _textBrush;
     }
 
     private TextBlock SectionTitle(string text) => new()
@@ -402,15 +414,39 @@ internal sealed class ClipboardSettingsWindow : Window
         {
             MinWidth = 66,
             Height = 34,
-            Margin = new Thickness(0, 0, 8, 0),
+            Margin = new Thickness(2, 0, 2, 0),
             Padding = new Thickness(12, 0, 12, 0),
-            CornerRadius = new CornerRadius(6),
-            BorderThickness = new Thickness(1),
-            Background = _ghostBrush,
-            BorderBrush = _lineBrush,
+            // 圆角/线宽/无描边都照悬浮栏按钮来，这样两边的高亮块长得一样
+            CornerRadius = new CornerRadius(7),
+            BorderThickness = new Thickness(2),
+            Background = Brushes.Transparent,
+            BorderBrush = Brushes.Transparent,
             Cursor = Cursors.Hand,
             Child = label,
         };
+
+        // lambda 里不能直接用 out 参数，先转成局部变量
+        var box = button;
+        var caption = label;
+
+        // 悬浮高亮：和悬浮栏按钮一样，鼠标移上去才亮（选中项已经有高亮底，不再叠）
+        button.MouseEnter += (_, _) =>
+        {
+            if (box.Tag is true) return;
+
+            box.Background = _hoverBrush;
+            caption.Foreground = _hoverTextBrush;
+        };
+
+        button.MouseLeave += (_, _) =>
+        {
+            if (box.Tag is true) return;
+
+            box.Background = Brushes.Transparent;
+            caption.Foreground = _textBrush;
+        };
+
+        label.Foreground = _textBrush;
 
         button.MouseLeftButtonDown += (_, e) => e.Handled = true;
         button.MouseLeftButtonUp += (_, e) =>
@@ -429,7 +465,7 @@ internal sealed class ClipboardSettingsWindow : Window
         {
             MinWidth = 96,
             Height = 36,
-            CornerRadius = new CornerRadius(6),
+            CornerRadius = new CornerRadius(ThemePalette.Resolve().ButtonCornerRadius),
             Background = background,
             BorderThickness = new Thickness(1),
             BorderBrush = border,

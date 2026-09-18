@@ -13,6 +13,29 @@ public enum DockTheme
     Custom = 3,
 }
 
+/// <summary>Alt+Tab 里"同名进程窗口打包"的范围。</summary>
+public enum AltTabGroupMode
+{
+    /// <summary>只合并被悬浮栏接管的程序（当前就是资源管理器文件夹窗口）。</summary>
+    TakeoverOnly = 0,
+
+    /// <summary>所有同名 exe 的窗口都合并成一张卡。</summary>
+    AllProcesses = 1,
+
+    /// <summary>完全不合并：每个窗口（多标签窗口是每个标签页）各占一张卡。</summary>
+    None = 2,
+}
+
+/// <summary>悬浮栏贴边隐藏时靠在哪条屏幕边上。</summary>
+public enum DockEdge
+{
+    None = 0,
+    Left = 1,
+    Right = 2,
+    Top = 3,
+    Bottom = 4,
+}
+
 public sealed class Settings
 {
     /// <summary>悬浮栏与菜单的配色方案。</summary>
@@ -51,6 +74,20 @@ public sealed class Settings
     public bool TakeoverEnabled { get; set; } = true;
 
     /// <summary>
+    /// 多窗口程序自动接管：桌面上某个程序（按 exe 名判定）的可见窗口达到 2 个及以上时，
+    /// 自动把这些窗口的按钮从任务栏移到悬浮栏。默认关，避免升级后任务栏突然少一堆按钮。
+    /// </summary>
+    public bool AutoTakeoverMultiWindow { get; set; }
+
+    /// <summary>
+    /// 手动指定要接管的程序（小写 exe 名，不带扩展名）。
+    ///
+    /// 这些程序**只要有 1 个窗口**就接管任务栏与窗口：用来补自动接管漏掉的，
+    /// 或者在关掉自动接管时只接管指定程序。
+    /// </summary>
+    public List<string> TakeoverProcesses { get; set; } = new();
+
+    /// <summary>
     /// 是否接管 Alt+Tab：自己画切换面板。
     /// 任务栏按钮被摘掉后，文件夹窗口会连带着从系统 Alt+Tab 里消失，所以只能自己接管。
     /// </summary>
@@ -62,11 +99,37 @@ public sealed class Settings
     /// </summary>
     public bool AltTabFullscreenPassthrough { get; set; } = true;
 
+    /// <summary>
+    /// 同名进程窗口在 Alt+Tab 里合并成一张卡的范围。
+    /// 默认只合并"被悬浮栏接管"的程序 —— 这样浏览器、Office 之类多窗口程序
+    /// 的切换习惯跟原来一样，与"以后把别的程序也搬上悬浮栏"的路线也一致：
+    /// 悬浮栏接管谁，谁才参与打包。
+    /// </summary>
+    public AltTabGroupMode AltTabGroupScope { get; set; } = AltTabGroupMode.TakeoverOnly;
+
     /// <summary>是否显示悬浮栏。</summary>
     public bool ShowDock { get; set; } = true;
 
     /// <summary>没有任何文件夹窗口时是否隐藏悬浮栏。</summary>
     public bool HideWhenEmpty { get; set; } = true;
+
+    /// <summary>
+    /// 贴边自动隐藏：悬浮栏停靠在屏幕边缘时自动滑出屏幕外，
+    /// 鼠标移到那条边缘再滑回来。默认开。
+    /// </summary>
+    public bool EdgeAutoHide { get; set; } = true;
+
+    /// <summary>贴边隐藏后，屏内保留的悬浮栏宽度（px），0 = 完全移出屏幕。</summary>
+    public double EdgePeekWidth { get; set; } = 8;
+
+    /// <summary>鼠标离屏幕边缘多少像素以内就把悬浮栏召回来（px）。</summary>
+    public double EdgeTriggerWidth { get; set; } = 4;
+
+    /// <summary>呼出之后，鼠标离开悬浮栏多久自动收回屏外（毫秒），0 = 立刻收回。</summary>
+    public int EdgeRetractDelayMs { get; set; } = 100;
+
+    /// <summary>上次贴边隐藏靠在哪条边；None 表示当前没有处于隐藏态。</summary>
+    public DockEdge EdgeHiddenSide { get; set; } = DockEdge.None;
 
     /// <summary>按钮上显示完整标题而不是截断到 145px。</summary>
     public bool ShowFullTitle { get; set; } = true;

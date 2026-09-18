@@ -250,6 +250,7 @@
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="14" />
                                     <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
                                 </Grid.ColumnDefinitions>
                                 <TextBlock x:Name="CheckMark"
                                            Grid.Column="0"
@@ -263,6 +264,44 @@
                                                   ContentSource="Header"
                                                   RecognizesAccessKey="True"
                                                   VerticalAlignment="Center" />
+                                <!-- 有子菜单时右侧那个小箭头 -->
+                                <TextBlock x:Name="SubmenuArrow"
+                                           Grid.Column="2"
+                                           Text="&#x203A;"
+                                           FontSize="12"
+                                           Margin="14,0,0,0"
+                                           Visibility="Collapsed"
+                                           Foreground="{DynamicResource DockMenuDisabled}"
+                                           VerticalAlignment="Center" />
+
+                                <!-- 子菜单：菜单项自己负责把子项弹出来（分组菜单就靠它） -->
+                                <Popup x:Name="PART_Popup"
+                                       AllowsTransparency="True"
+                                       Focusable="False"
+                                       IsOpen="{TemplateBinding IsSubmenuOpen}"
+                                       Placement="Right"
+                                       HorizontalOffset="0"
+                                       VerticalOffset="-10"
+                                       PopupAnimation="None">
+                                    <Border Margin="8"
+                                            Padding="6"
+                                            CornerRadius="10"
+                                            Background="{DynamicResource DockMenuBackground}"
+                                            BorderBrush="{DynamicResource DockMenuBorder}"
+                                            BorderThickness="1">
+                                        <Border.Effect>
+                                            <DropShadowEffect BlurRadius="18" ShadowDepth="3" Direction="270"
+                                                              Opacity="0.55" Color="Black" RenderingBias="Performance" />
+                                        </Border.Effect>
+                                        <ScrollViewer MaxHeight="640"
+                                                      VerticalScrollBarVisibility="Auto"
+                                                      HorizontalScrollBarVisibility="Disabled">
+                                            <StackPanel IsItemsHost="True"
+                                                        MinWidth="176"
+                                                        KeyboardNavigation.DirectionalNavigation="Cycle" />
+                                        </ScrollViewer>
+                                    </Border>
+                                </Popup>
                             </Grid>
                         </Border>
                         <ControlTemplate.Triggers>
@@ -276,6 +315,9 @@
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
                                 <Setter Property="Foreground" Value="{DynamicResource DockMenuDisabled}" />
+                            </Trigger>
+                            <Trigger Property="HasItems" Value="True">
+                                <Setter TargetName="SubmenuArrow" Property="Visibility" Value="Visible" />
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>

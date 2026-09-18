@@ -16,7 +16,7 @@ public partial class App : Application
 
     private Mutex? _mutex;
     private EventWaitHandle? _quitEvent;
-    private ExplorerWatcher? _watcher;
+    private IWindowHost? _windowHost;
     private TrayIconManager? _tray;
     private TaskbarTweaker? _taskbar;
     private AltTabController? _altTab;
@@ -35,6 +35,15 @@ public partial class App : Application
     {
         base.OnStartup(e);
         ShutdownMode = ShutdownMode.OnExplicitShutdown;
+
+        // 功能进程模式：没有界面，只跑"需要管理员权限"的那套脏活（枚举窗口、摘任务栏按钮、
+        // 激活窗口、读写标签页），等界面进程通过命名管道连过来。放在最前面：它不受单实例锁限制。
+        if (e.Args.Any(a => a.Equals("--host", StringComparison.OrdinalIgnoreCase)))
+        {
+            Settings = Settings.Load();
+            RunAsHost();
+            return;
+        }
 
         // 调试用：--clip-dump 只读导出剪贴板库。放在最前面：它不受单实例锁限制，
         // 也不会因为"当前是管理员权限启动"被提权重启顶掉。
@@ -151,14 +160,9 @@ public partial class App : Application
             return;
         }
 
-        // 记住的选择：上次设成"以管理员身份运行"，这次却是普通权限起来的（双击 exe、开机自启……），
-        // 就自己再提权重启一次。提权实例进来时 IsElevated 为 true，不会递归。
-        // （放在 --restore 之后：应急开关不该被 UAC 拦一道）
-        if (Settings.RunElevated && !IsElevated)
-        {
-            RestartElevated();
-            return;
-        }
+        // 界面进程**不再请求提权**：需要管理员权限的事都交给 --host 进程去做，
+        // 界面保持普通权限，才能正常接收资源管理器这类普通权限程序发来的消息。
+        // （提权与否由 Settings.RunElevated 决定 --host 的启动方式）
 
         Dock = new DockWindow();
         if (Settings.ShowDock) Dock.Show();
@@ -167,12 +171,21 @@ public partial class App : Application
         // 否则开机自启会留下一条空白的悬浮栏
         Dock.RefreshVisibility();
 
-        _watcher = new ExplorerWatcher
+        // 界面进程始终普通权限；需要管理员权限的活交给 --host 进程。
+        // 连不上（比如用户在 UAC 弹窗上点了"否"）就退回同进程实现：功能照旧，
+        // 只是"以管理员运行的程序"那些窗口接管不到。
+        var remote = new RemoteWindowHost();
+        if (remote.Connect(Settings.RunElevated))
         {
-            TakeoverEnabled = Settings.TakeoverEnabled,
-        };
-        _watcher.SnapshotUpdated += OnSnapshotUpdated;
-        _watcher.Start();
+            _windowHost = remote;
+        }
+        else
+        {
+            _windowHost = new LocalWindowHost(Settings.TakeoverEnabled);
+        }
+
+        _windowHost.SnapshotUpdated += OnSnapshotUpdated;
+        _windowHost.Start();
 
         _tray = new TrayIconManager(this);
 
@@ -277,6 +290,26 @@ public partial class App : Application
     /// Alt+Tab 只能由系统接管 —— 想让这类窗口也归我们管，就得和它们同级。
     /// 代价是每次启动要过 UAC。
     /// </summary>
+    /// <summary>
+    /// 功能进程模式（<c>--host</c>）：没有界面，只跑窗口接管那套"需要管理员权限"的活
+    /// （枚举窗口、摘任务栏按钮、激活/最小化、读写标签页），然后等界面进程连过来。
+    /// 界面进程连不上它时，功能会退回同进程降级运行。
+    /// </summary>
+    private void RunAsHost()
+    {
+        var runtime = new HostRuntime();
+
+        var thread = new Thread(() => runtime.Run())
+        {
+            IsBackground = true,
+            Name = "ExplorerDock.Host",
+        };
+
+        thread.Start();
+
+        Exit += (_, _) => runtime.Dispose();
+    }
+
     public void RestartElevated()
     {
         try
@@ -338,15 +371,19 @@ public partial class App : Application
         ExitApp();
     }
 
-    /// <summary>记住"以管理员身份运行"这个选择，并按新状态重启一次。</summary>
+    /// <summary>
+    /// 记住"功能进程要不要以管理员身份运行"，并重启一次让它生效。
+    ///
+    /// 界面进程本身永远普通权限（这样才收得到普通权限程序发来的消息），
+    /// 这个开关只决定 <c>--host</c> 进程以什么权限启动。
+    /// </summary>
     public void SetRunElevated(bool enabled)
     {
         Settings.RunElevated = enabled;
         Settings.Save();
         RefreshStartupRegistration();
 
-        if (enabled && !IsElevated) RestartElevated();
-        else if (!enabled && IsElevated) RestartNormal();
+        RestartNormal();
     }
 
     /// <summary>取消"以管理员身份运行"之前的提醒。返回 false 表示用户反悔了。</summary>
@@ -401,12 +438,99 @@ public partial class App : Application
         Settings.TakeoverEnabled = enabled;
         Settings.Save();
 
-        if (_watcher is null) return;
-        _watcher.TakeoverEnabled = enabled;
-
-        if (enabled) _watcher.ReapplyNow();
-        else _watcher.RestoreNow();
+        _windowHost?.SetTakeover(enabled);
     }
+
+    /// <summary>多窗口程序自动接管：同名程序窗口达到 2 个就自动搬上悬浮栏。</summary>
+    public void SetAutoTakeoverMultiWindow(bool enabled)
+    {
+        Settings.AutoTakeoverMultiWindow = enabled;
+        Settings.Save();
+        PushTakeoverScope();
+    }
+
+    /// <summary>手动指定要接管的程序（小写 exe 名）。</summary>
+    public void SetTakeoverProcesses(IReadOnlyList<string> processes)
+    {
+        Settings.TakeoverProcesses = processes.ToList();
+        Settings.Save();
+        PushTakeoverScope();
+    }
+
+    /// <summary>
+    /// 把接管范围推给窗口宿主。
+    /// 这两条判定都在宿主侧做（枚举窗口是它的活），本地实现与 --host 进程走同一个接口。
+    /// </summary>
+    private void PushTakeoverScope()
+    {
+        try
+        {
+            _windowHost?.SetTakeoverScope(Settings.AutoTakeoverMultiWindow, Settings.TakeoverProcesses);
+        }
+        catch
+        {
+            // 宿主还没起来/已掉线：下次启动会按 settings.json 初始化
+        }
+    }
+
+    private Views.ProcessPickerWindow? _processPicker;
+
+    /// <summary>打开「接管指定程序」窗口。</summary>
+    public void OpenProcessPicker()
+    {
+        if (_processPicker is { IsVisible: true })
+        {
+            _processPicker.Activate();
+            return;
+        }
+
+        _processPicker = new Views.ProcessPickerWindow(this);
+        _processPicker.Closed += (_, _) => _processPicker = null;
+        _processPicker.Show();
+    }
+
+    private Views.HelpWindow? _help;
+
+    /// <summary>打开「使用说明」窗口。</summary>
+    public void OpenHelp()
+    {
+        if (_help is { IsVisible: true })
+        {
+            _help.Activate();
+            return;
+        }
+
+        _help = new Views.HelpWindow();
+        _help.Closed += (_, _) => _help = null;
+        _help.Show();
+    }
+
+    /// <summary>
+    /// 把键盘接管需要的状态镜像给窗口宿主。
+    ///
+    /// 钩子在提权进程里（管理员程序占前台时，普通权限的钩子收不到按键），
+    /// 它得知道"接管开关开着没""面板是不是正在接管中"才能决定吞不吞按键。
+    /// </summary>
+    public void PushKeyState()
+    {
+        try
+        {
+            _windowHost?.SetKeyState(
+                Settings.AltTabTakeover,
+                Settings.ClipboardTakeover,
+                _altTab?.PanelBusy == true);
+        }
+        catch
+        {
+            // 宿主不可用时忽略
+        }
+    }
+
+    /// <summary>
+    /// 需要碰目标窗口的那部分能力（窗口监视、激活/最小化、标签页、卡片列表）。
+    /// 现在跑在同进程里；拆进程后这里会换成走管道的远程实现，调用方不用改。
+    /// </summary>
+    public IWindowHost WindowHost => _windowHost ?? throw new InvalidOperationException("窗口宿主还没起来");
 
     /// <summary>Alt+Tab 面板是不是正开着（悬浮栏用它避让置顶）。</summary>
     public bool AltTabActive => _altTab?.IsActive == true;
@@ -517,6 +641,142 @@ public partial class App : Application
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// 把系统拖放带来的数据写进系统剪贴板 —— 往目标窗口补 Ctrl+V 是唯一通用的粘贴路径。
+    ///
+    /// 这份内容是"用完即走"的临时数据：**不进本软件的剪贴板历史**（Suppress 掉采集），
+    /// 但也不主动清理系统剪贴板（清早了目标还没读完，粘贴就废了）。
+    /// </summary>
+    public bool WriteDroppedDataToClipboard(IDataObject data)
+    {
+        try
+        {
+            _clipMonitor?.Suppress(TimeSpan.FromSeconds(3));
+        }
+        catch
+        {
+            // 采集器没起来也无所谓，继续写剪贴板
+        }
+
+        // 逐格式把数据"搬实"再写进剪贴板。
+        // 拖放源给的多数是延迟渲染的 IDataObject：直接把它交给剪贴板（SetDataObject(data, true)），
+        // 等拖放会话一结束源那边就把数据收走了 —— 随后补 Ctrl+V 时剪贴板里其实是空的，
+        // 表现就是"拖放没粘上，而且没有任何报错"。这里在 Drop 处理期间逐个 GetData 取出，
+        // 装进我们自己的 DataObject 再写，Word 那种 HTML/RTF 排版也一并保住。
+        try
+        {
+            var copy = new DataObject();
+
+            foreach (var format in data.GetFormats())
+            {
+                // "Preferred DropEffect" 单独处理（见下面）
+                if (string.Equals(format, "Preferred DropEffect", StringComparison.OrdinalIgnoreCase)) continue;
+
+                try
+                {
+                    var value = data.GetData(format);
+                    if (value is not null) copy.SetData(format, value);
+                }
+                catch
+                {
+                    // 单个格式取不到就跳过，别的格式还能用
+                }
+            }
+
+            // 拖放源可能声明"这是移动"（DROPEFFECT_MOVE = 2）；照搬过去，目标的粘贴就变成剪切，
+            // 文件真的会被搬走。这里统一写成"复制"（DROPEFFECT_COPY = 1）。
+            try
+            {
+                copy.SetData("Preferred DropEffect", new MemoryStream(new byte[] { 1, 0, 0, 0 }));
+            }
+            catch
+            {
+                // 写不进去也无所谓，多数目标不靠它
+            }
+
+            if (copy.GetFormats().Length > 0)
+            {
+                Clipboard.SetDataObject(copy, true);
+                return true;
+            }
+        }
+        catch
+        {
+            // 整份搬不动（少见）：落到下面的分类兜底
+        }
+
+        try
+        {
+            if (data.GetDataPresent(DataFormats.FileDrop) &&
+                data.GetData(DataFormats.FileDrop) is string[] files && files.Length > 0)
+            {
+                var list = new System.Collections.Specialized.StringCollection();
+                list.AddRange(files);
+                Clipboard.SetFileDropList(list);
+                return true;
+            }
+
+            if (data.GetDataPresent(DataFormats.Bitmap) &&
+                data.GetData(DataFormats.Bitmap) is System.Windows.Media.Imaging.BitmapSource bitmap)
+            {
+                Clipboard.SetImage(bitmap);
+                return true;
+            }
+
+            if (data.GetDataPresent(DataFormats.UnicodeText) &&
+                data.GetData(DataFormats.UnicodeText) is string text && text.Length > 0)
+            {
+                Clipboard.SetText(text);
+                return true;
+            }
+        }
+        catch (Exception ex)
+        {
+            Views.ConfirmDialog.Notify("无法把拖来的内容放进剪贴板", $"{ex.GetType().Name}: {ex.Message}");
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// 从剪贴板面板拖出来的一条记录，松手落在我们自己的界面上（悬浮栏按钮 / Alt+Tab 卡片）。
+    ///
+    /// 返回 true = 这次落点已经被消费（调用方不要再按"拖到别的程序"处理）。
+    /// </summary>
+    public bool PasteClipItemOnOwnSurface(ClipItem item, int screenX, int screenY)
+    {
+        // 1) 悬浮栏按钮（带标签页：资源管理器多标签窗口会切到对应标签页再粘）
+        if (Dock is not null && Dock.TryGetItemAt(screenX, screenY, out var hwnd, out var tabIndex))
+        {
+            if (WriteClipItemForTarget(item, hwnd)) WindowPaste.Deliver(this, hwnd, tabIndex);
+
+            _clipboard?.Panel.HidePanel();
+            return true;
+        }
+
+        // 2) Alt+Tab 卡片（打包卡取的就是组内最后活动的那个窗口）。
+        //    面板不在这里收起：它由"松开 Alt"驱动关闭，拖放期间保持显示。
+        if (_altTab is not null && _altTab.TryGetCardAt(screenX, screenY, out hwnd, out tabIndex))
+        {
+            if (WriteClipItemForTarget(item, hwnd)) WindowPaste.Deliver(this, hwnd, tabIndex);
+
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>按目标窗口挑合适的写法：资源管理器/桌面只认文件，图片得先落成临时文件。</summary>
+    private bool WriteClipItemForTarget(ClipItem item, IntPtr target)
+    {
+        if (item.Kind == ClipKind.Image && IsFileManagerWindow(target))
+        {
+            return WriteClipItemAsFileDrop(item);
+        }
+
+        return WriteClipItemToClipboard(item, target);
     }
 
     /// <summary>目标窗口是不是"只认文件"的那种（资源管理器、桌面）。</summary>
@@ -786,6 +1046,7 @@ public partial class App : Application
     {
         Settings.AltTabTakeover = enabled;
         Settings.Save();
+        PushKeyState();
 
         // 关掉的时候立刻把可能开着的面板收掉，下一次 Alt+Tab 就交还系统
         if (!enabled) _altTab?.CancelNow();
@@ -797,17 +1058,67 @@ public partial class App : Application
         Settings.Save();
     }
 
+    /// <summary>Alt+Tab 里同名进程窗口的合并范围（改完下一次切换生效）。</summary>
+    public void SetAltTabGroupScope(AltTabGroupMode mode)
+    {
+        Settings.AltTabGroupScope = mode;
+        Settings.Save();
+
+        // 卡片列表是在宿主里数出来的，范围必须推过去，否则改完"没反应"
+        try
+        {
+            _windowHost?.SetAltTabGroupMode(mode);
+        }
+        catch
+        {
+            // 宿主还没起来/已掉线：下次启动按 settings.json 初始化
+        }
+    }
+
     /// <summary>是否接管 Win+V（用本软件的面板替换系统剪贴板历史）。</summary>
     public void SetClipboardTakeover(bool enabled)
     {
         Settings.ClipboardTakeover = enabled;
         Settings.Save();
+        PushKeyState();
     }
 
     public void SetHideWhenEmpty(bool enabled)
     {
         Settings.HideWhenEmpty = enabled;
         Settings.Save();
+    }
+
+    /// <summary>开关「贴边自动隐藏」：关掉时如果正收纳着，立刻放回屏幕内。</summary>
+    public void SetEdgeAutoHide(bool enabled)
+    {
+        Settings.EdgeAutoHide = enabled;
+        Settings.Save();
+
+        Dock?.ApplyEdgeHideSettings();
+    }
+
+    private Views.EdgeHideSettingsWindow? _edgeHideSettings;
+
+    /// <summary>打开「贴边隐藏设置」窗口（残余宽度、鼠标触发带宽）。</summary>
+    public void OpenEdgeHideSettings()
+    {
+        try
+        {
+            if (_edgeHideSettings is { IsVisible: true })
+            {
+                _edgeHideSettings.Activate();
+                return;
+            }
+
+            _edgeHideSettings = new Views.EdgeHideSettingsWindow(this);
+            _edgeHideSettings.Closed += (_, _) => _edgeHideSettings = null;
+            _edgeHideSettings.Show();
+        }
+        catch (Exception ex)
+        {
+            Views.ConfirmDialog.Notify("贴边隐藏设置打开失败", $"{ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     public void SetShowDock(bool show)
@@ -852,12 +1163,22 @@ public partial class App : Application
         _taskbar?.Restore(hwnd);
     }
 
-    /// <summary>应急：把所有文件夹窗口的按钮还给任务栏（清掉统一分组 + 还原可能被摘除的按钮）。</summary>
+    /// <summary>应急：把所有被接管的窗口还给任务栏（清掉统一分组 + 还原可能被摘除的按钮）。</summary>
     public static void RestoreEverythingToTaskbar()
     {
         using var taskbar = new TaskbarTweaker();
 
-        foreach (var hwnd in ExplorerWatcher.EnumerateWindows())
+        // 文件夹窗口 + 按当前设置算出来的其他程序窗口（自动接管也一并还原）
+        var handles = new HashSet<IntPtr>();
+
+        foreach (var hwnd in ExplorerWatcher.EnumerateWindows()) handles.Add(hwnd);
+
+        foreach (var hwnd in ExplorerWatcher.ComputeScope(Settings.AutoTakeoverMultiWindow, Settings.TakeoverProcesses))
+        {
+            handles.Add(hwnd);
+        }
+
+        foreach (var hwnd in handles)
         {
             try
             {
@@ -1098,7 +1419,6 @@ public partial class App : Application
     /// <summary>
     /// 调试用：把剪贴板库导出到 %TEMP%\ed-clipdump（索引摘要 + 每条图片的原始字节），
     /// 用来核对"图片原样无损"这条硬指标。
-    /// </summary>
     private void DumpClipboardStore(ClipboardStore store)
     {
         try
@@ -1223,7 +1543,7 @@ public partial class App : Application
     {
         try
         {
-            _watcher?.Dispose();
+            _windowHost?.Dispose();
         }
         catch
         {
@@ -1294,7 +1614,7 @@ public partial class App : Application
     {
         try
         {
-            _watcher?.Dispose();
+            _windowHost?.Dispose();
         }
         catch
         {
