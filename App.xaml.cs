@@ -505,6 +505,32 @@ public partial class App : Application
         _help.Show();
     }
 
+    private Views.UpdateWindow? _updateWindow;
+
+    /// <summary>
+    /// 打开「检查更新」窗口。
+    /// 只有用户主动点菜单才会去查 GitHub —— 不点就不联网检查。
+    /// </summary>
+    public void OpenUpdateWindow()
+    {
+        try
+        {
+            if (_updateWindow is { IsVisible: true })
+            {
+                _updateWindow.Activate();
+                return;
+            }
+
+            _updateWindow = new Views.UpdateWindow();
+            _updateWindow.Closed += (_, _) => _updateWindow = null;
+            _updateWindow.Show();
+        }
+        catch (Exception ex)
+        {
+            Views.ConfirmDialog.Notify("检查更新打开失败", $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
     /// <summary>
     /// 把键盘接管需要的状态镜像给窗口宿主。
     ///

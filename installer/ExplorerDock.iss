@@ -40,10 +40,10 @@ MinVersion=10.0.17763
 PrivilegesRequired=lowest
 
 [Languages]
-; 注意：本机 Inno 安装目录里的 Default.isl 已被换成简体中文，
-; 所以英文那条不能再用 compiler:Default.isl（会再多出一个"简体中文"选项）
+; 英文用 Inno 自带的 compiler:Default.isl（本机这份是英文）；
+; 中文用随项目带的 ChineseSimplified.isl
 Name: "chinesesimplified"; MessagesFile: "ChineseSimplified.isl"
-Name: "english"; MessagesFile: "compiler:Languages\English.isl"
+Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"

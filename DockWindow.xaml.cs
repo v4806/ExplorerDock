@@ -2374,6 +2374,7 @@ public partial class DockWindow : Window
         menu.Items.Add(MenuGroup(
             "维护",
             MenuAction("设置向导…", Host.OpenSetupWizard),
+            MenuAction("检查更新", Host.OpenUpdateWindow),
             MenuAction("查看日志", Host.OpenLogs),
             MenuAction("重启资源管理器", App.RestartExplorer)));
 
