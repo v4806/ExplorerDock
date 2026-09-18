@@ -883,7 +883,10 @@ public partial class DockWindow : Window
         var area = SystemParameters.WorkArea;
 
         Left = area.Left + Math.Max(0, (area.Width - ActualWidth) / 2);
-        Top = area.Top + 6;
+
+        // 不贴屏幕最上沿：贴边自动隐藏的判定阈值是 12px，落到 6px 会一启动就被收纳起来。
+        // 留 28px —— 还是在上边，但稳稳在阈值之外。
+        Top = area.Top + 28;
 
         UpdateTooltipPlacement();
     }

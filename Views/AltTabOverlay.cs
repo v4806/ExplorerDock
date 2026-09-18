@@ -77,7 +77,10 @@ internal sealed class AltTabOverlay : Window
 
         _scroll = new ScrollViewer
         {
-            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            // 常驻滚动条，不用 Auto：Auto 会在"出现/消失"之间切换内容区宽度，
+            // 而卡片宽度是固定的，宽度一少几个像素，一行里最后一张就被挤到下一行 ——
+            // 卡片一多（正好要滚动的时候）整个布局就跟着挪位。
+            VerticalScrollBarVisibility = ScrollBarVisibility.Visible,
             HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             CanContentScroll = false,
             Focusable = false,
@@ -87,6 +90,11 @@ internal sealed class AltTabOverlay : Window
 
         // 滚动时要重新摆缩略图（DWM 缩略图贴的是屏幕坐标，不跟着 WPF 滚动走）
         _scroll.ScrollChanged += (_, _) => Scrolled?.Invoke();
+
+        // 面板是分层窗口（AllowsTransparency），WPF 在这种窗口里默认**不裁剪**内容：
+        // 滚动区放不下的卡片会直接画到面板外面（用户报的"卡片根本没被裁剪"）。
+        // 显式开裁剪，滑动条才真的把超出的卡片收纳掉。
+        _scroll.ClipToBounds = true;
 
         FontFamily = _palette.Typeface;
 
@@ -170,16 +178,20 @@ internal sealed class AltTabOverlay : Window
         // 滚动条的位置一直预留出来：它出现/消失时不会把每行挤成少一张卡
         double reserve = SystemParameters.VerticalScrollBarWidth;
 
+        // 再留几个像素的余量：取整、边框、DPI 换算各差一点，正好卡在"放得下/放不下"的边界上，
+        // 一行就会少一张卡（用户报的"变成滚动列表之后布局就乱了"）。
+        const double ScrollSlack = 8;
+
         var area = SystemParameters.WorkArea;
         double maxWidth = area.Width * 0.94;
         double maxHeight = area.Height * 0.78;
 
         // 列数：既不超过 MaxPerRow，也不超过屏幕放得下的数量
-        int fit = (int)((maxWidth - chrome - reserve) / (CardWidth + CardGap));
+        int fit = (int)((maxWidth - chrome - reserve - ScrollSlack) / (CardWidth + CardGap));
         int columns = Math.Clamp(items.Count, 1, Math.Max(1, Math.Min(MaxPerRow, fit)));
         int rows = Math.Max(1, (int)Math.Ceiling(items.Count / (double)columns));
 
-        double scrollWidth = columns * (CardWidth + CardGap) + reserve;
+        double scrollWidth = columns * (CardWidth + CardGap) + reserve + ScrollSlack;
         double scrollHeight = Math.Min(rows * (CardHeight + CardGap), Math.Max(CardHeight, maxHeight - chrome));
 
         _scroll.Width = scrollWidth;
@@ -246,7 +258,13 @@ internal sealed class AltTabOverlay : Window
 
                     var rect = new Int32Rect((int)Math.Round(topLeft.X), (int)Math.Round(topLeft.Y), width, height);
 
-                    if (visible is { } area && !Intersects(rect, area)) continue;
+                    if (visible is { } area)
+                    {
+                        // 只保留落在可视区里的那一段：不然宿主窗口会被"只露出一角的格子"撑到面板之外，
+                        // 缩略图就贴着画到面板外面去了（跟上面 ClipToBounds 一起解决"没裁剪"）
+                        rect = Intersect(rect, area);
+                        if (rect.Width <= 2 || rect.Height <= 2) continue;
+                    }
 
                     slots.Add(new ThumbnailSlot(cell.Handle, rect));
                 }
@@ -273,6 +291,24 @@ internal sealed class AltTabOverlay : Window
 
     /// <summary>见 <see cref="ForwardDragOver"/>。</summary>
     public void ForwardDrop(DragEventArgs e) => OnCardDrop(this, e);
+
+    /// <summary>
+    /// 缩略图层收到滚轮时转过来滚列表（那层窗口盖在卡片上，滚轮到不了这里）。
+    /// 一格滚轮滚一行，跟 ScrollViewer 自己的手感一致。
+    /// </summary>
+    public void ForwardMouseWheel(System.Windows.Input.MouseWheelEventArgs e)
+    {
+        try
+        {
+            var step = CardHeight + CardGap;
+            _scroll.ScrollToVerticalOffset(_scroll.VerticalOffset - (Math.Sign(e.Delta) * step));
+            e.Handled = true;
+        }
+        catch
+        {
+            // 忽略
+        }
+    }
 
     /// <summary>
     /// 屏幕坐标落在哪张卡上（拖放落点判定）。
@@ -375,6 +411,19 @@ internal sealed class AltTabOverlay : Window
     private static bool Intersects(Int32Rect a, Int32Rect b)
         => a.X < b.X + b.Width && b.X < a.X + a.Width
         && a.Y < b.Y + b.Height && b.Y < a.Y + a.Height;
+
+    /// <summary>两块矩形的交集；不相交时返回零尺寸。</summary>
+    private static Int32Rect Intersect(Int32Rect a, Int32Rect b)
+    {
+        int left = Math.Max(a.X, b.X);
+        int top = Math.Max(a.Y, b.Y);
+        int right = Math.Min(a.X + a.Width, b.X + b.Width);
+        int bottom = Math.Min(a.Y + a.Height, b.Y + b.Height);
+
+        if (right <= left || bottom <= top) return new Int32Rect(left, top, 0, 0);
+
+        return new Int32Rect(left, top, right - left, bottom - top);
+    }
 
     // ---------- 卡片 ----------
 

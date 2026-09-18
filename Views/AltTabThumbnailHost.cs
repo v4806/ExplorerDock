@@ -1,3 +1,5 @@
+using System.IO;
+using System.Threading;
 using System.Windows;
 using System.Windows.Interop;
 using System.Windows.Media;
@@ -32,6 +34,12 @@ internal sealed class AltTabThumbnailHost : IDisposable
 
     /// <summary>见 <see cref="DragOverForward"/>：把落下事件转交给面板处理。</summary>
     public Action<DragEventArgs>? DropForward { get; set; }
+
+    /// <summary>
+    /// 这一层同样会吃掉鼠标滚轮（它是独立的窗口），所以滚轮也要转发给面板，
+    /// 否则鼠标停在卡片上就滚不动列表、只有卡片之间的缝里能滚。
+    /// </summary>
+    public Action<System.Windows.Input.MouseWheelEventArgs>? WheelForward { get; set; }
 
     /// <summary>按当前卡片位置摆好缩略图（在面板显示之后调用）。</summary>
     public void Show(IReadOnlyList<ThumbnailSlot> slots, Color background)
@@ -128,6 +136,9 @@ internal sealed class AltTabThumbnailHost : IDisposable
         _window.DragOver += (_, e) => DragOverForward?.Invoke(e);
         _window.Drop += (_, e) => DropForward?.Invoke(e);
 
+        // 滚轮也转发（见 WheelForward 的注释）
+        _window.MouseWheel += (_, e) => WheelForward?.Invoke(e);
+
         // 鼠标穿透 + 不进任务栏/Alt+Tab
         long style = NativeMethods.GetWindowLongPtr(_hwnd, NativeMethods.GWL_EXSTYLE);
         NativeMethods.SetWindowLongPtr(
@@ -140,12 +151,14 @@ internal sealed class AltTabThumbnailHost : IDisposable
     {
         Unregister();
 
+        int ok = 0, failed = 0, small = 0, dead = 0;
+
         foreach (var slot in slots)
         {
-            if (slot.Rect.Width <= 2 || slot.Rect.Height <= 2) continue;
-            if (!NativeMethods.IsWindow(slot.Handle)) continue;
+            if (slot.Rect.Width <= 2 || slot.Rect.Height <= 2) { small++; continue; }
+            if (!NativeMethods.IsWindow(slot.Handle)) { dead++; continue; }
 
-            if (!NativeMethods.RegisterThumbnail(_hwnd, slot.Handle, out var id)) continue;
+            if (!NativeMethods.RegisterThumbnail(_hwnd, slot.Handle, out var id)) { failed++; continue; }
 
             var properties = new NativeMethods.DWM_THUMBNAIL_PROPERTIES
             {
@@ -159,8 +172,37 @@ internal sealed class AltTabThumbnailHost : IDisposable
                 fSourceClientAreaOnly = true,
             };
 
-            if (NativeMethods.UpdateThumbnail(id, ref properties)) _registered.Add(id);
-            else NativeMethods.UnregisterThumbnail(id);
+            if (NativeMethods.UpdateThumbnail(id, ref properties))
+            {
+                _registered.Add(id);
+                ok++;
+            }
+            else
+            {
+                NativeMethods.UnregisterThumbnail(id);
+                failed++;
+            }
+        }
+
+        // 卡片多的时候这里最容易出问题（缩略图一半是黑的），把账目记下来
+        Log($"register ok={ok} failed={failed} small={small} dead={dead} slots={slots.Count} bounds={bounds.X},{bounds.Y} {bounds.Width}x{bounds.Height}");
+    }
+
+    private static int _logCount;
+
+    private static void Log(string message)
+    {
+        if (Interlocked.Increment(ref _logCount) > 200) return;
+
+        try
+        {
+            File.AppendAllText(
+                Path.Combine(Path.GetTempPath(), "ExplorerDock.thumbs.log"),
+                $"{DateTime.Now:HH:mm:ss.fff} {message}{Environment.NewLine}");
+        }
+        catch
+        {
+            // 忽略
         }
     }
 

@@ -464,6 +464,7 @@ internal sealed class AltTabController : IDisposable
                 {
                     DragOverForward = e => _overlay?.ForwardDragOver(e),
                     DropForward = e => _overlay?.ForwardDrop(e),
+                    WheelForward = e => _overlay?.ForwardMouseWheel(e),
                 };
             }
 

@@ -250,6 +250,15 @@ internal sealed class HostKeyboard : IDisposable
         {
             var hwnd = NativeMethods.GetForegroundWindow();
             if (hwnd == IntPtr.Zero) return false;
+
+            // 桌面 / 任务栏本来就铺满整个屏幕，不能算"全屏应用"。
+            // 不排除它们的话，在桌面上按 Alt+Tab 会被让给系统 —— 用户报的"桌面上按出来的是系统面板"。
+            var className = NativeMethods.GetClassNameSafe(hwnd);
+            if (className is "Progman" or "WorkerW" or "Shell_TrayWnd" or "Shell_SecondaryTrayWnd")
+            {
+                return false;
+            }
+
             if (!NativeMethods.TryGetMonitorRect(hwnd, out var monitor)) return false;
             if (!NativeMethods.GetWindowRect(hwnd, out var bounds)) return false;
 

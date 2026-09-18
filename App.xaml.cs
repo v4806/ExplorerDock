@@ -74,6 +74,17 @@ public partial class App : Application
 
     private static int _crashDialogShown;
 
+    /// <summary>正在退出：退出阶段的异常只记日志，不弹窗。</summary>
+    private static volatile bool _shuttingDown;
+
+    /// <summary>
+    /// 进程退出阶段的噪音：CRT/运行时的卸载回调里找不到 vcruntime140_cor3.dll 之类。
+    /// 那会儿进程本来就要没了，报出来只会吓人。
+    /// </summary>
+    private static bool IsExitNoise(Exception? ex)
+        => ex is DllNotFoundException
+           && (ex.StackTrace?.Contains("CrtImplementationDetails", StringComparison.Ordinal) ?? false);
+
     /// <summary>
     /// 记一份崩溃日志（%TEMP%\ExplorerDock.crash.log），第一次出错时弹个框把路径告诉用户。
     /// </summary>
@@ -101,7 +112,7 @@ public partial class App : Application
             return;
         }
 
-        if (!showDialog) return;
+        if (!showDialog || _shuttingDown || IsExitNoise(ex)) return;
         if (Interlocked.Increment(ref _crashDialogShown) > 1) return;
 
         try
@@ -1693,6 +1704,9 @@ public partial class App : Application
 
     public void ExitApp()
     {
+        // 从这一刻起算"正在退出"：退出阶段的异常（尤其是 CRT 卸载回调那种）只记日志、不弹窗
+        _shuttingDown = true;
+
         // 退出前先"临时取消接管"：走的是和右键菜单「接管任务栏按钮」同一条路 ——
         // 窗口按钮回到任务栏、文件夹窗口也重新回到系统 Alt+Tab。
         // 这一下**不写设置**（只调宿主，不碰 Settings.TakeoverEnabled），
@@ -1777,6 +1791,8 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
+        _shuttingDown = true;
+
         try
         {
             _windowHost?.Dispose();
