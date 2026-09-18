@@ -19,6 +19,9 @@ public partial class DockWindow : Window
     private readonly StackPanel _itemsHost;
     private readonly ScrollViewer _scroller;
     private readonly Border _grip;
+
+    /// <summary>横排内容容器：左右箭头 + 滚动区 + 上下箭头（把手在它外面，按布局模式换位置）。</summary>
+    private readonly StackPanel _contentRow;
     private Border? _scrollLeft;
     private Border? _scrollRight;
     private Border? _scrollUp;
@@ -168,13 +171,23 @@ public partial class DockWindow : Window
         verticalArrows.Children.Add(_scrollUp);
         verticalArrows.Children.Add(_scrollDown);
 
-        RootPanel.Children.Add(_grip);
-        RootPanel.Children.Add(_scrollLeft);
-        RootPanel.Children.Add(_scroller);
-        RootPanel.Children.Add(_scrollRight);
-        RootPanel.Children.Add(verticalArrows);
+        // 横排内容：左箭头 + 滚动区 + 右箭头 + 上下箭头
+        _contentRow = new StackPanel
+        {
+            Orientation = Orientation.Horizontal,
+            VerticalAlignment = VerticalAlignment.Center,
+        };
 
-        UpdateScrollerMaxWidth();
+        _contentRow.Children.Add(_scrollLeft);
+        _contentRow.Children.Add(_scroller);
+        _contentRow.Children.Add(_scrollRight);
+        _contentRow.Children.Add(verticalArrows);
+
+        // 把手：横幅模式在左边竖着放；堆叠模式挪到顶上横着放（见 ApplyLayoutOrientation）
+        RootPanel.Children.Add(_grip);
+        RootPanel.Children.Add(_contentRow);
+
+        ApplyLayoutOrientation();
 
         _scroller.ScrollChanged += (_, _) => UpdateScrollButtons();
         _itemsHost.SizeChanged += (_, _) => QueueScrollButtonUpdate();
@@ -447,12 +460,21 @@ public partial class DockWindow : Window
         double chrome = RootBorder.BorderThickness.Left + RootBorder.BorderThickness.Right
                       + RootBorder.Padding.Left + RootBorder.Padding.Right;
 
-        double room = (MaxWidth - chrome) / Math.Max(1.0, _scale);
-        room -= _grip?.Width ?? 0;
-        room -= (_scrollLeft?.Width ?? 0) + (_scrollRight?.Width ?? 0);
-        room -= 16;   // 纵向那对箭头占的一条
+        if (StackMode)
+        {
+            // 堆叠模式：内容就是一列按钮，滚动区按行宽算就行。
+            // 按"窗口最大宽度"算的话右边会空出一大块（用户报的"不显示完整标题时右边很宽"）。
+            _scroller.MaxWidth = Math.Max(120, StackMaxWidth);
+        }
+        else
+        {
+            double room = (MaxWidth - chrome) / Math.Max(1.0, _scale);
+            room -= _grip?.Width ?? 0;
+            room -= (_scrollLeft?.Width ?? 0) + (_scrollRight?.Width ?? 0);
+            room -= 16;   // 纵向那对箭头占的一条
 
-        _scroller.MaxWidth = Math.Max(120, room);
+            _scroller.MaxWidth = Math.Max(120, room);
+        }
 
         // 高度上限：横幅模式约屏幕一半；堆叠模式给到四分之三（一列能摆下更多窗口才滚动）。
         // SizeToContent=WidthAndHeight 下不显式给 MaxHeight 就没有可滚空间，行一多会被窗口直接裁掉。
@@ -1387,8 +1409,16 @@ public partial class DockWindow : Window
     /// <summary>堆叠模式：所有窗口按钮竖着一列排，不同程序之间夹分隔线。</summary>
     private bool StackMode => App.Settings.Layout == DockLayout.Stack;
 
-    /// <summary>堆叠模式下按钮的统一宽度（按钮会横向撑满这一行）。</summary>
-    private const double StackButtonWidth = 260;
+    /// <summary>
+    /// 堆叠模式的**最高宽度**。
+    ///
+    /// 列宽本身是动态的（按标题文字自己撑开，标题短就窄），但再长也不超过这个宽度 ——
+    /// 不然一条长路径/浏览器标签就把整列拉满屏幕。
+    /// </summary>
+    private const double StackMaxWidth = 260;
+
+    /// <summary>标题的最大宽度 = 最高宽度扣掉图标(18)、间距(9)、左右内边距(18) 和边框余量。</summary>
+    private const double StackTitleWidth = 260 - 18 - 9 - 18 - 6;
 
     /// <summary>分隔线的标记：重排时靠它把旧的分隔线挑出来清掉。</summary>
     private const string RowSeparatorTag = "row-separator";
@@ -1403,7 +1433,8 @@ public partial class DockWindow : Window
             Orientation = StackMode ? Orientation.Vertical : Orientation.Horizontal,
         };
 
-        if (StackMode) row.MinWidth = StackButtonWidth;
+        // 堆叠模式不给行设固定宽度：列宽由标题文字自己撑开（长的宽、短的窄），
+        // 上限由 _scroller.MaxWidth 兜着。
 
         _rows[rowKey] = row;
         _rowOrder.Add(rowKey);
@@ -1463,11 +1494,42 @@ public partial class DockWindow : Window
         _rowOrder.Clear();
         _items.Clear();
 
-        UpdateScrollerMaxWidth();
+        ApplyLayoutOrientation();
         QueueScrollButtonUpdate();
 
         if (_lastSnapshot is not null) ApplySnapshot(_lastSnapshot);
         else RefreshVisibility();
+    }
+
+    /// <summary>
+    /// 按布局模式摆放把手：
+    /// 横幅 = 把手在左侧竖着；堆叠 = 把手挪到顶部横着。
+    ///
+    /// 堆叠模式下整条本来就窄（一列按钮），左边再横着占 22px 更挤；
+    /// 放顶上横着既省宽度，也不用改拖动的判定。
+    /// </summary>
+    private void ApplyLayoutOrientation()
+    {
+        if (StackMode)
+        {
+            RootPanel.Orientation = Orientation.Vertical;
+
+            _grip.Width = double.NaN;
+            _grip.Height = 20;
+            _grip.HorizontalAlignment = HorizontalAlignment.Stretch;
+            _grip.VerticalAlignment = VerticalAlignment.Center;
+        }
+        else
+        {
+            RootPanel.Orientation = Orientation.Horizontal;
+
+            _grip.Width = 22;
+            _grip.Height = double.NaN;
+            _grip.HorizontalAlignment = HorizontalAlignment.Center;
+            _grip.VerticalAlignment = VerticalAlignment.Stretch;
+        }
+
+        UpdateScrollerMaxWidth();
     }
 
     /// <summary>
@@ -1594,7 +1656,7 @@ public partial class DockWindow : Window
 
             // 只有"前台窗口 + 它当前显示的那个标签页"才是活动按钮
             visual.Update(info, _activeWindow == info.Handle && info.TabSelected);
-            visual.Label.MaxWidth = App.Settings.ShowFullTitle ? 340 : 145;
+            visual.Label.MaxWidth = StackMode ? StackTitleWidth : App.Settings.ShowFullTitle ? 340 : 145;
         }
 
         foreach (var key in _items.Keys.ToList())
@@ -1666,7 +1728,11 @@ public partial class DockWindow : Window
             Margin = new Thickness(9, 0, 0, 0),
             VerticalAlignment = VerticalAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis,
-            MaxWidth = App.Settings.ShowFullTitle ? 340 : 145,
+            // 横幅模式要限制按钮宽度，得给标题设上限；
+            // 堆叠模式按列宽算（扣掉图标 18、间距 9、左右内边距 18 和一点余量），
+            // 让文字在列内截断 —— 既不会右空一大块，也不会把列撑宽、招来左右箭头。
+            MaxWidth = StackMode ? StackTitleWidth
+                     : App.Settings.ShowFullTitle ? 340 : 145,
         };
 
         var content = new StackPanel { Orientation = Orientation.Horizontal };
@@ -2277,10 +2343,9 @@ public partial class DockWindow : Window
     private void ShowMenu()
     {
         var menu = BuildAppMenu();
-        menu.PlacementTarget = this;
 
-        // 跟着鼠标弹：这样托盘的右键也能复用同一套菜单
-        menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Bottom;
+        // 跟着鼠标弹：贴边或靠近屏幕边缘时，按窗口定位会被挤出屏幕、还会被裁掉
+        menu.Placement = System.Windows.Controls.Primitives.PlacementMode.MousePoint;
 
         OpenMenu(menu);
     }

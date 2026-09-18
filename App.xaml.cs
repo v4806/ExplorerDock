@@ -1312,10 +1312,14 @@ public partial class App : Application
         }
     }
 
-    /// <summary>切换"显示完整标题"后让按钮重新排版。</summary>
+    /// <summary>
+    /// 切换"显示完整标题"后让按钮重新排版。
+    ///
+    /// 走重建（不只是刷新可见性）：堆叠模式下标题宽度决定了整列的宽度，得重新摆一遍。
+    /// </summary>
     public void RebuildDockItems()
     {
-        Dock?.RefreshVisibility();
+        Dock?.RebuildLayout();
     }
 
     /// <summary>把悬浮栏放回屏幕底部居中。</summary>
