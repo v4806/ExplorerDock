@@ -22,6 +22,9 @@ public partial class DockWindow : Window
 
     /// <summary>横排内容容器：左右箭头 + 滚动区 + 上下箭头（把手在它外面，按布局模式换位置）。</summary>
     private readonly StackPanel _contentRow;
+
+    /// <summary>把手上的点阵图标：堆叠模式要把把手转成横的，图标也得跟着转。</summary>
+    private TextBlock? _gripDots;
     private Border? _scrollLeft;
     private Border? _scrollRight;
     private Border? _scrollUp;
@@ -614,7 +617,12 @@ public partial class DockWindow : Window
             Foreground = _mutedBrush,
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
+
+            // 旋转中心放在自身中心，堆叠模式下转 90° 才不会歪出去
+            RenderTransformOrigin = new Point(0.5, 0.5),
         };
+
+        _gripDots = dots;
 
         var grip = new Border
         {
@@ -1518,6 +1526,9 @@ public partial class DockWindow : Window
             _grip.Height = 20;
             _grip.HorizontalAlignment = HorizontalAlignment.Stretch;
             _grip.VerticalAlignment = VerticalAlignment.Center;
+
+            // 把手横过来了，点阵图标也跟着转成横的
+            if (_gripDots is not null) _gripDots.RenderTransform = new RotateTransform(90);
         }
         else
         {
@@ -1527,6 +1538,8 @@ public partial class DockWindow : Window
             _grip.Height = double.NaN;
             _grip.HorizontalAlignment = HorizontalAlignment.Center;
             _grip.VerticalAlignment = VerticalAlignment.Stretch;
+
+            if (_gripDots is not null) _gripDots.RenderTransform = Transform.Identity;
         }
 
         UpdateScrollerMaxWidth();
