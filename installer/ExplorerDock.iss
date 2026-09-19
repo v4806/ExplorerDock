@@ -39,6 +39,12 @@ MinVersion=10.0.17763
 ; 装到用户目录，不需要管理员权限
 PrivilegesRequired=lowest
 
+; 让安装程序知道"ExplorerDock 正在运行"（按单实例锁的名字判断），
+; 配合下面的 PrepareToInstall 在覆盖文件前把旧实例请走
+AppMutex=Local\ExplorerDock.SingleInstance.v1
+CloseApplications=yes
+RestartApplications=no
+
 [Languages]
 ; 英文用 Inno 自带的 compiler:Default.isl（本机这份是英文）；
 ; 中文用随项目带的 ChineseSimplified.isl
@@ -67,6 +73,26 @@ Filename: "{app}\{#MyAppExeName}"; Parameters: "--quit"; Flags: runhidden waitun
 Type: filesandordirs; Name: "{app}"
 
 [Code]
+// 安装开始前：先让正在运行的旧版本正常退出。
+//
+// 不做这一步的话，旧实例会一直占着 ExplorerDock.exe 等文件，
+// 覆盖时就报"拒绝访问"，用户得自己去任务管理器结束进程。
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode: Integer;
+begin
+  Result := '';
+
+  if FileExists(ExpandConstant('{app}\{#MyAppExeName}')) then
+  begin
+    // --quit 会让它走正常退出流程（窗口还给任务栏），然后自己退干净
+    Exec(ExpandConstant('{app}\{#MyAppExeName}'), '--quit', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+
+    // 给它一点时间真的退场（退出流程里还要把窗口还回任务栏）
+    Sleep(1500);
+  end;
+end;
+
 // 卸载时问一句要不要连设置和剪贴板数据一起删掉。
 // 默认按钮是"否"（MB_DEFBUTTON2）—— 也就是默认保留数据。
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
