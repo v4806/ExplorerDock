@@ -11,8 +11,8 @@ namespace ExplorerDock.Services;
 /// <summary>GitHub Release 里的一个可下载文件（这里只用安装包那一个）。</summary>
 public sealed record UpdateAsset(string Name, string DownloadUrl, long Size);
 
-/// <summary>一次检查更新的结果：tag 名、版本号、可下载的安装包（没发 Release 时为 null）。</summary>
-public sealed record UpdateInfo(string Tag, Version Version, UpdateAsset? Setup);
+/// <summary>一次检查更新的结果：tag 名、版本号、可下载的安装包（没发 Release 时为 null）、该版本的说明正文。</summary>
+public sealed record UpdateInfo(string Tag, Version Version, UpdateAsset? Setup, string Notes);
 
 /// <summary>
 /// 检查更新：查 GitHub 上的 tag，取最大的 vX.Y.Z 和当前版本比。
@@ -78,6 +78,7 @@ public static class UpdateChecker
         if (latest <= Normalize(CurrentVersion)) return null;
 
         UpdateAsset? setup = null;
+        var notes = string.Empty;
 
         try
         {
@@ -86,13 +87,31 @@ public static class UpdateChecker
                 .ConfigureAwait(false);
 
             setup = FindSetupAsset(releaseJson);
+            notes = ReadBody(releaseJson);
         }
         catch (HttpRequestException)
         {
             // 新版本可能只打了 tag 还没发 Release：那就只告诉用户有新版，不给下载
         }
 
-        return new UpdateInfo(latestTag, latest, setup);
+        return new UpdateInfo(latestTag, latest, setup, notes);
+    }
+
+    /// <summary>取 Release 的说明正文（发版时写的那段介绍，就是确认框里的"新版本简介"）。</summary>
+    private static string ReadBody(string releaseJson)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(releaseJson);
+
+            return document.RootElement.TryGetProperty("body", out var body)
+                ? body.GetString() ?? string.Empty
+                : string.Empty;
+        }
+        catch
+        {
+            return string.Empty;
+        }
     }
 
     /// <summary>下载安装包到临时目录，返回本地完整路径。</summary>

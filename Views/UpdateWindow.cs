@@ -178,9 +178,14 @@ internal sealed class UpdateWindow : Window
 
             SetStatus($"发现新版本 {info.Tag}");
 
+            // 确认框里带上这个版本的说明（就是发版时写的 Release 正文）
+            var message = string.IsNullOrWhiteSpace(info.Notes)
+                ? "是否下载并运行安装包？"
+                : "是否下载并运行安装包？" + Environment.NewLine + Environment.NewLine + info.Notes;
+
             bool download = ConfirmDialog.Confirm(
                 $"发现新版本 {info.Tag}",
-                "是否下载并运行安装包？",
+                message,
                 "下载",
                 "取消");
 

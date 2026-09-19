@@ -67,15 +67,27 @@ internal sealed class ConfirmDialog : Window
             TextWrapping = TextWrapping.Wrap,
         });
 
-        stack.Children.Add(new TextBlock
+        // 更新说明可能很长（直接把 Release 正文贴进来）：给个高度上限、超了就滚动，
+        // 免得对话框被撑到屏幕外面去。
+        var messageHost = new ScrollViewer
         {
-            Text = message,
-            FontSize = ThemePalette.Resolve().FontSizeMedium,
-            LineHeight = 23,
+            MaxHeight = 380,
+            VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+            HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
             Margin = new Thickness(0, 12, 0, 0),
-            Foreground = mutedBrush,
-            TextWrapping = TextWrapping.Wrap,
-        });
+            Content = new TextBlock
+            {
+                Text = message,
+                FontSize = ThemePalette.Resolve().FontSizeMedium,
+                LineHeight = 23,
+                Foreground = mutedBrush,
+                TextWrapping = TextWrapping.Wrap,
+            },
+        };
+
+        ThemeScrollBar.Apply(messageHost, palette.Muted, palette);
+
+        stack.Children.Add(messageHost);
 
         var buttons = new StackPanel
         {
