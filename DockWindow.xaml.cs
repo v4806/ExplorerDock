@@ -283,7 +283,7 @@ public partial class DockWindow : Window
         // 定时重新钉一遍，被遮住也能自己回来
         _topmostTimer = new DispatcherTimer(DispatcherPriority.Background)
         {
-            Interval = TimeSpan.FromMilliseconds(800),
+            Interval = TimeSpan.FromMilliseconds(500),
         };
         _topmostTimer.Tick += (_, _) =>
         {
@@ -787,37 +787,21 @@ public partial class DockWindow : Window
 
         var shadowHandle = ShadowHandle();
 
-        var probe = new NativeMethods.POINT
-        {
-            X = (int)Math.Round(Left + (ActualWidth / 2)),
-            Y = (int)Math.Round(Top + (ActualHeight / 2)),
-        };
+        // 无条件重钉一遍。
+        //
+        // 原来是"探测到被别的窗口盖住才钉、而且 1.5 秒内只钉一次"，于是点一下任务栏
+        // （它自己也是置顶窗、一点就插到我们前面）之后，要等一两秒才回来 ——
+        // 用户的感觉就是"任务栏把悬浮栏挡住了，得再点一下悬浮栏才恢复"。
+        // 先落到普通层再重新置顶，才能挤进 Topmost 组的最前面（只改样式是插不了队的）；
+        // 两次 SetWindowPos 是微秒级开销，隔几百毫秒钉一次完全无感。
+        _lastTopmostFix = DateTime.UtcNow;
 
-        var top = NativeMethods.WindowFromPoint(probe);
-        bool covered = top != IntPtr.Zero && top != dockHandle && top != shadowHandle;
-
-        if (covered && (DateTime.UtcNow - _lastTopmostFix).TotalSeconds > 1.5)
-        {
-            _lastTopmostFix = DateTime.UtcNow;
-
-            // 先落到普通层再重新置顶，才能挤进 Topmost 组的最前面（只改样式是插不了队的）
-            NativeMethods.SetWindowPos(dockHandle, NativeMethods.HWND_NOTOPMOST, 0, 0, 0, 0,
-                NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
-            NativeMethods.SetWindowPos(dockHandle, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
-                NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
-            NativeMethods.SetWindowPos(shadowHandle, dockHandle, 0, 0, 0, 0,
-                NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
-
-            Diag($"topmost: covered by 0x{top.ToInt64():X}, re-pinned");
-            return;
-        }
-
-        // 没被盖住时只需保证阴影层还在自己下面
-        if (shadowHandle != IntPtr.Zero)
-        {
-            NativeMethods.SetWindowPos(shadowHandle, dockHandle, 0, 0, 0, 0,
-                NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
-        }
+        NativeMethods.SetWindowPos(dockHandle, NativeMethods.HWND_NOTOPMOST, 0, 0, 0, 0,
+            NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
+        NativeMethods.SetWindowPos(dockHandle, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
+            NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
+        NativeMethods.SetWindowPos(shadowHandle, dockHandle, 0, 0, 0, 0,
+            NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
     }
 
     private IntPtr ShadowHandle()
