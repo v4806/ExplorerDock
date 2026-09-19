@@ -566,11 +566,18 @@ public sealed class ExplorerWatcher : IDisposable
         if (hwnd == IntPtr.Zero || !NativeMethods.IsWindow(hwnd)) return false;
         if (!NativeMethods.IsWindowVisible(hwnd)) return false;
 
-        // 有 owner 的通常是对话框/浮动面板，不是独立的应用窗口
-        if (NativeMethods.GetWindow(hwnd, NativeMethods.GW_OWNER) != IntPtr.Zero) return false;
-
         long extended = NativeMethods.GetWindowLongPtr(hwnd, NativeMethods.GWL_EXSTYLE);
         if ((extended & NativeMethods.WS_EX_TOOLWINDOW) != 0) return false;
+
+        // 有 owner 的通常是对话框/浮动面板，不是独立的应用窗口 —— 但带 WS_EX_APPWINDOW 的例外：
+        // 那是任务栏上**真有自己按钮**的窗口（Blender 的「偏好设置」就是这样：owner 是主窗口，
+        // 却因为带了这个样式单独占一个任务栏按钮）。既然任务栏看得见它，就该能接管它。
+        // 没带这个样式的 owned 窗口（普通对话框）任务栏上本来就没按钮，仍然排除。
+        if (NativeMethods.GetWindow(hwnd, NativeMethods.GW_OWNER) != IntPtr.Zero
+            && (extended & NativeMethods.WS_EX_APPWINDOW) == 0)
+        {
+            return false;
+        }
 
         // UWP 的"隐身窗口"：IsWindowVisible 说可见，其实被 DWM 藏着
         if (NativeMethods.IsCloaked(hwnd)) return false;
