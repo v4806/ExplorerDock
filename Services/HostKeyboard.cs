@@ -54,11 +54,20 @@ internal sealed class HostKeyboard : IDisposable
 
     public void SetState(bool altTabTakeover, bool clipboardTakeover, bool panelOpen, bool fullscreenPassthrough)
     {
+        // 记住"面板是什么时候开始接管的"：ESC 的吞噬要有个时间兜底，见 OnKey 里那一支
+        if (panelOpen && !_panelOpen) _panelOpenedAt = DateTime.UtcNow;
+
         _altTabTakeover = altTabTakeover;
         _clipboardTakeover = clipboardTakeover;
         _panelOpen = panelOpen;
         _fullscreenPassthrough = fullscreenPassthrough;
     }
+
+    /// <summary>面板开始接管的时刻（ESC 兜底用）。</summary>
+    private DateTime _panelOpenedAt = DateTime.MinValue;
+
+    /// <summary>面板最多接管多久；超过这个时间还认为"开着"，就当成状态脏了、放行按键。</summary>
+    private const double PanelTrustSeconds = 20;
 
     public void Dispose() => _hook.Dispose();
 
@@ -138,6 +147,11 @@ internal sealed class HostKeyboard : IDisposable
 
             case KeyboardHook.VK_ESCAPE:
                 if (!stroke.Down || !_panelOpen) return false;
+
+                // 兜底：面板状态万一没同步回来（界面侧漏发一次 / 管道丢包 / 界面进程异常），
+                // ESC 会被永远吞掉 —— 表现为"任何程序里 ESC 都没反应，退出本软件才恢复"。
+                // 真实的面板只开几秒，超过 PanelTrustSeconds 就当状态是脏的，直接放行。
+                if ((DateTime.UtcNow - _panelOpenedAt).TotalSeconds > PanelTrustSeconds) return false;
 
                 _notify(HostProtocol.KeyCancel);
                 return true;

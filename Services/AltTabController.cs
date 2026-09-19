@@ -235,6 +235,12 @@ internal sealed class AltTabController : IDisposable
     {
         _opening = false;
 
+        // 不管后面走哪条分支，先把"已经不在 opening 了"同步给宿主。
+        //
+        // 少了这一句，"打开面板的过程中就松手"那条路（下面直接切换、不弹面板）会漏掉同步：
+        // 宿主还记着 panelOpen=true，于是 ESC 被它一直吞掉 —— 用户报的"ESC 有时候卡住按了没反应"。
+        SyncKeyState();
+
         bool processScoped = _processScoped;
         _processScoped = false;
 
