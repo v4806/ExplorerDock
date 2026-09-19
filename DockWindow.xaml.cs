@@ -79,12 +79,17 @@ public partial class DockWindow : Window
     private bool _edgeSelfMove;
 
     /// <summary>动画时长。逐帧插值，阴影层每一帧都跟着重算，不会留残影。</summary>
-    private const double EdgeAnimMs = 200;
+    private const double EdgeAnimMs = 150;
 
-    /// <summary>鼠标探测：光标是不是挪到贴边那条屏幕边上了。</summary>
+    /// <summary>
+    /// 鼠标探测：光标是不是挪到贴边那条屏幕边上了。
+    ///
+    /// 30ms 一轮（≈33Hz）：原来是 120ms，鼠标扫到边缘要等小半秒才反应，用户觉得"不跟手"。
+    /// 一轮就是一次 GetCursorPos + 一次坐标换算，开销可以忽略。
+    /// </summary>
     private readonly DispatcherTimer _edgeProbe = new(DispatcherPriority.Background)
     {
-        Interval = TimeSpan.FromMilliseconds(120),
+        Interval = TimeSpan.FromMilliseconds(30),
     };
 
     /// <summary>光标离开悬浮栏的时刻，用来算"过一会儿自动收回"。</summary>
