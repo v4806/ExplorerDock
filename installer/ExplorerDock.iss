@@ -4,6 +4,7 @@
 ;            -p:PublishSingleFile=false -o artifacts\publish-selfcontained
 
 #define MyAppName "ExplorerDock"
+#define MyAppId "{{7C4E1B92-5F3D-4A88-9C21-6D0E5A7B4F31}"
 #define MyAppVersion "1.0.8"
 #define MyAppPublisher "v4806"
 #define MyAppURL "https://github.com/v4806/ExplorerDock"
@@ -11,7 +12,7 @@
 #define SourceDir "..\artifacts\publish-selfcontained"
 
 [Setup]
-AppId={{7C4E1B92-5F3D-4A88-9C21-6D0E5A7B4F31}
+AppId={#MyAppId}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppVerName={#MyAppName} {#MyAppVersion}
@@ -39,9 +40,9 @@ MinVersion=10.0.17763
 ; 装到用户目录，不需要管理员权限
 PrivilegesRequired=lowest
 
-; 让安装程序知道"ExplorerDock 正在运行"（按单实例锁的名字判断），
-; 配合下面的 PrepareToInstall 在覆盖文件前把旧实例请走
-AppMutex=Local\ExplorerDock.SingleInstance.v1
+; 注意：这里**不能**写 AppMutex —— 它会让安装程序在向导一开始就弹
+; 「检测到 ExplorerDock 正在运行，请先关闭」，而那会儿我们的自动退出还没跑。
+; 自动退出统一由 [Code] 的 InitializeSetup / PrepareToInstall 负责。
 CloseApplications=yes
 RestartApplications=no
 
@@ -73,10 +74,34 @@ Filename: "{app}\{#MyAppExeName}"; Parameters: "--quit"; Flags: runhidden waitun
 Type: filesandordirs; Name: "{app}"
 
 [Code]
-// 安装开始前：先让正在运行的旧版本正常退出。
+// 安装程序一启动就把正在运行的旧版本请走。
 //
-// 不做这一步的话，旧实例会一直占着 ExplorerDock.exe 等文件，
-// 覆盖时就报"拒绝访问"，用户得自己去任务管理器结束进程。
+// 为什么放在这里而不是 PrepareToInstall：用户看到"准备安装"之前就已经开始复制文件了，
+// 而且最早的时机处理掉，才不会走到"检测到程序正在运行"那种把人卡住的提示。
+// --quit 会让它走正常退出流程（窗口还给任务栏、无损取消接管），比直接 taskkill 干净。
+function InitializeSetup(): Boolean;
+var
+  InstallDir: string;
+  ExePath: string;
+  ResultCode: Integer;
+begin
+  Result := True;
+
+  if RegQueryStringValue(HKCU,
+       'Software\Microsoft\Windows\CurrentVersion\Uninstall\{#MyAppId}_is1',
+       'InstallLocation', InstallDir) then
+  begin
+    ExePath := AddBackslash(InstallDir) + '{#MyAppExeName}';
+
+    if FileExists(ExePath) then
+    begin
+      Exec(ExePath, '--quit', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+      Sleep(2000);
+    end;
+  end;
+end;
+
+// 再兜一层：真正开始覆盖文件之前确认旧实例已经走了（万一上面那次没赶上）
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ResultCode: Integer;
@@ -85,10 +110,7 @@ begin
 
   if FileExists(ExpandConstant('{app}\{#MyAppExeName}')) then
   begin
-    // --quit 会让它走正常退出流程（窗口还给任务栏），然后自己退干净
     Exec(ExpandConstant('{app}\{#MyAppExeName}'), '--quit', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-
-    // 给它一点时间真的退场（退出流程里还要把窗口还回任务栏）
     Sleep(1500);
   end;
 end;
