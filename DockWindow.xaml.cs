@@ -792,12 +792,12 @@ public partial class DockWindow : Window
         // 原来是"探测到被别的窗口盖住才钉、而且 1.5 秒内只钉一次"，于是点一下任务栏
         // （它自己也是置顶窗、一点就插到我们前面）之后，要等一两秒才回来 ——
         // 用户的感觉就是"任务栏把悬浮栏挡住了，得再点一下悬浮栏才恢复"。
-        // 先落到普通层再重新置顶，才能挤进 Topmost 组的最前面（只改样式是插不了队的）；
-        // 两次 SetWindowPos 是微秒级开销，隔几百毫秒钉一次完全无感。
+        // 这里只重新置顶一次，不再"先落到普通层再置顶"两步走：
+        // 落回普通层的那一瞬间窗口会掉出 Topmost 组，下面压着的窗口会露出来并被重绘，
+        // 半秒一次就成了用户看到的"悬浮栏每隔一段时间闪一下"。
+        // 单次 HWND_TOPMOST 同样能把已经是置顶的窗口提到 Topmost 组最前面（只是改样式才插不了队）。
         _lastTopmostFix = DateTime.UtcNow;
 
-        NativeMethods.SetWindowPos(dockHandle, NativeMethods.HWND_NOTOPMOST, 0, 0, 0, 0,
-            NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
         NativeMethods.SetWindowPos(dockHandle, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
             NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
         NativeMethods.SetWindowPos(shadowHandle, dockHandle, 0, 0, 0, 0,
