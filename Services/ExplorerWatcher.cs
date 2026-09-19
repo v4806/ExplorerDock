@@ -790,8 +790,15 @@ public sealed class ExplorerWatcher : IDisposable
 
                 if (!NativeMethods.IsWindowVisible(candidate)) return true;
 
-                // 带 owner 的通常是对话框/浮动面板，不算独立窗口
-                if (NativeMethods.GetWindow(candidate, NativeMethods.GW_OWNER) != IntPtr.Zero) return true;
+                // 带 owner 的通常是对话框/浮动面板，不算独立窗口；
+                // 但带 WS_EX_APPWINDOW 的要另算 —— 它在任务栏上占着自己的按钮，
+                // 跟接管范围保持同一套规则，关的时候也一起关。
+                long extended = NativeMethods.GetWindowLongPtr(candidate, NativeMethods.GWL_EXSTYLE);
+                if (NativeMethods.GetWindow(candidate, NativeMethods.GW_OWNER) != IntPtr.Zero
+                    && (extended & NativeMethods.WS_EX_APPWINDOW) == 0)
+                {
+                    return true;
+                }
 
                 targets.Add(candidate);
             }
