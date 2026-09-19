@@ -368,7 +368,20 @@ internal static class NativeMethods
     }
 
     public static string GetWindowTextSafe(IntPtr hWnd)
+        => TryGetWindowText(hWnd, out var text) ? text : string.Empty;
+
+    /// <summary>
+    /// 跨进程问窗口要标题，并告诉调用方"这次到底问出来没有"。
+    ///
+    /// 两种"空"必须分得清：返回 true 但字符串为空 = 窗口确实没有标题（隐形窗口这类）；
+    /// 返回 false = 对方没响应（挂起或消息循环忙），WM_GETTEXT 超时、或被 SMTO_ABORTIFHUNG 直接放弃。
+    /// 接管范围判据要靠这个区分「这个窗口不存在」和「这个窗口只是卡住了」。
+    /// </summary>
+    public static bool TryGetWindowText(IntPtr hWnd, out string text)
     {
+        text = string.Empty;
+        if (hWnd == IntPtr.Zero) return false;
+
         // 必须用 WM_GETTEXT 跨进程去问窗口要标题。
         // GetWindowText 对属于**其他进程**的窗口不会真的去问，只返回本进程缓存的副本 ——
         // 结果就是资源管理器窗口的标题变了（比如关掉多余标签页），我们却一直读到旧值。
@@ -382,7 +395,10 @@ internal static class NativeMethods
             300,
             out _);
 
-        return ok != IntPtr.Zero ? sb.ToString() : string.Empty;
+        if (ok == IntPtr.Zero) return false;
+
+        text = sb.ToString();
+        return true;
     }
 
     public const uint WM_GETTEXT = 0x000D;

@@ -34,6 +34,9 @@ public sealed class ExplorerWatcher : IDisposable
     /// <summary>自动接管的取消滞后：窗口数掉到 1 之后连续这么多轮才真正还回去，避免开关窗口时按钮闪烁。</summary>
     private const int AutoDropGraceTicks = 4;
 
+    /// <summary>窗口没响应、问不出标题时用的兜底标题（用户看到的悬浮栏按钮文字）。</summary>
+    private const string NotRespondingTitle = "（未响应）";
+
     private static readonly string[] TitleSuffixes =
     {
         " - 文件资源管理器",
@@ -592,8 +595,14 @@ public sealed class ExplorerWatcher : IDisposable
         NativeMethods.GetWindowThreadProcessId(hwnd, out uint pid);
         if ((int)pid == Environment.ProcessId) return false;   // 功能进程自己的窗口
 
-        var title = NativeMethods.GetWindowTextSafe(hwnd);
-        if (string.IsNullOrWhiteSpace(title)) return false;
+        // 标题：读不出来（窗口没响应、挂起或者消息循环正忙）时给个兜底标题，**不能**当成
+        // "没有标题的隐形窗口"丢掉 —— 未响应的窗口恰恰是用户最需要看见、最需要点回来处理的那一个。
+        // 只有"真问出来了、但确实是空标题"才排除。
+        bool titleRead = NativeMethods.TryGetWindowText(hwnd, out var title);
+
+        if (titleRead && string.IsNullOrWhiteSpace(title)) return false;
+
+        if (!titleRead) title = NotRespondingTitle;
 
         var (name, path) = DescribeProcess(pid);
         if (name.Length == 0) return false;
