@@ -148,7 +148,7 @@ public sealed class Settings
     public bool ShowFullTitle { get; set; } = true;
 
     /// <summary>
-    /// 尺寸变化时保持居中：横幅模式对齐屏幕**水平**中线（宽度中点），堆叠模式对齐**垂直**中线。
+    /// 「居中模式」（菜单里的名字）：横幅模式对齐屏幕**水平**中线（宽度中点），堆叠模式对齐**垂直**中线。
     /// 默认关。开着的时候另一条轴仍由用户自己摆放 —— 只把该居中的那条轴钉在中线上。
     /// </summary>
     public bool CenterOnScreen { get; set; }

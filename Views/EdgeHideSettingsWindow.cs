@@ -12,7 +12,7 @@ namespace ExplorerDock.Views;
 /// 整窗与自定义主题面板同一套风格（无边框 + 圆角 + 自绘标题栏），
 /// 底色/文字色一律取自 ThemePalette，跟着主题走。
 ///
-/// 「尺寸变化时保持居中」「锁定位置」两个开关不在这里 —— 它们在右键菜单的「悬浮栏」里。
+/// 「居中模式」「锁定位置」两个开关不在这里 —— 它们在右键菜单的「悬浮栏」里。
 /// </summary>
 internal sealed class EdgeHideSettingsWindow : Window
 {

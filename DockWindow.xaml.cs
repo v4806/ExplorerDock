@@ -2979,13 +2979,13 @@ public partial class DockWindow : Window
             MenuSeparator(),
             // 居中与锁定放在这里，而不是贴边设置窗里：它们管的是"栏怎么摆"，
             // 跟贴边那三个数值不是一回事
-            CheckItem("尺寸变化时保持居中", App.Settings.CenterOnScreen, v =>
+            CheckItem("居中模式", App.Settings.CenterOnScreen, v =>
             {
                 App.Settings.CenterOnScreen = v;
                 App.Settings.Save();
                 ApplyCentering();
             }),
-            CheckItem("锁定位置（不可拖动）", App.Settings.DockLocked, v =>
+            CheckItem("锁定位置", App.Settings.DockLocked, v =>
             {
                 App.Settings.DockLocked = v;
                 App.Settings.Save();
