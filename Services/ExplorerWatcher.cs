@@ -310,6 +310,30 @@ public sealed class ExplorerWatcher : IDisposable
             RestoreTaskbar(handle);
         }
 
+        // 未响应窗口：**加样式 + 每轮补刀**，两件事一起做。
+        //
+        // 未响应的窗口**每轮**都要补刀。
+        //
+        // 窗口一挂起，shell 会重新把它当成"无响应"的条目、把按钮加回任务栏（实测日志：
+        // 按钮确实回来了，而我们的代码从没还过按钮）。常规补刀是 8 轮（约 2.8 秒）一次，太慢 ——
+        // 用户看到的就是"未响应的窗口仍然会短暂出现在任务栏一会儿"。
+        //
+        // 走过一条弯路：给窗口加 WS_EX_TOOLWINDOW 想让它"从规则上不该有按钮"，
+        // 实机两次验证都没用（加了样式 + 发了 FRAMECHANGED，shell 照样重建按钮；
+        // 撤掉补刀换成纯样式时按钮反而一直赖着）。所以这里就是最终形态：每轮补刀，
+        // 暴露时间 ≤ 一轮轮询（约 350ms）。
+        bool patchedHung = false;
+
+        foreach (var handle in _stripped)
+        {
+            if (!NativeMethods.IsHungAppWindow(handle)) continue;
+
+            _taskbar.Remove(handle);
+            patchedHung = true;
+        }
+
+        if (patchedHung) return;
+
         // 任务栏偶尔会自己把按钮加回来（切标签、最小化还原、程序重设 AUMID），定期补一刀
         if (_tick % TakeoverReapplyTicks != 0) return;
 
@@ -320,12 +344,46 @@ public sealed class ExplorerWatcher : IDisposable
     {
         try
         {
+            DiagnoseTaskbar(handle, "把按钮还回任务栏");   // 这一刻是谁把按钮放出来的，日志说了算
             AppUserModelId.TrySet(handle, null);
             _taskbar.Restore(handle);
         }
         catch
         {
             // 窗口可能已经没了
+        }
+    }
+
+    /// <summary>
+    /// 任务栏按钮诊断（`%TEMP%\ExplorerDock.taskbar.log`）。
+    ///
+    /// 用来回答一个问题："未响应窗口的按钮又冒出来"到底是**我们**（枚举判据抖了一下、把它踢出
+    /// 接管范围，于是 AddTab 还回去）还是 **shell 自己**加回来的 —— 这两者的根治做法完全不同。
+    /// 只要日志里没有对应的 `把按钮还回任务栏` 记录，就说明不是我们放的手。
+    /// </summary>
+    private void DiagnoseTaskbar(IntPtr handle, string action)
+    {
+        try
+        {
+            var path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "ExplorerDock.taskbar.log");
+
+            var info = new System.IO.FileInfo(path);
+            if (info.Exists && info.Length > 256 * 1024) System.IO.File.Delete(path);
+
+            long extended = NativeMethods.GetWindowLongPtr(handle, NativeMethods.GWL_EXSTYLE);
+            bool titleRead = NativeMethods.TryGetWindowText(handle, out var title);
+
+            System.IO.File.AppendAllText(path,
+                $"{DateTime.Now:HH:mm:ss.fff} {action} hwnd=0x{handle.ToInt64():X} tick={_tick} " +
+                $"vis={NativeMethods.IsWindowVisible(handle)} hung={NativeMethods.IsHungAppWindow(handle)} " +
+                $"iconic={NativeMethods.IsIconic(handle)} cloaked={NativeMethods.IsCloaked(handle)} " +
+                $"ex=0x{extended:X8} owner=0x{NativeMethods.GetWindow(handle, NativeMethods.GW_OWNER).ToInt64():X} " +
+                $"cls={NativeMethods.GetClassNameSafe(handle)} titleRead={titleRead} title='{title}'" +
+                Environment.NewLine);
+        }
+        catch
+        {
+            // 诊断失败不影响接管本身
         }
     }
 

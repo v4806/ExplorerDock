@@ -1053,18 +1053,49 @@ public partial class DockWindow : Window
             && top <= SystemParameters.VirtualScreenTop + SystemParameters.VirtualScreenHeight - 20;
     }
 
+    /// <summary>
+    /// 悬浮栏**当前所在那块屏幕**的边界（DIP）—— 居中与默认位置都按它算。
+    ///
+    /// 为什么不能用 `SystemParameters.VirtualScreen*`：那是**整块虚拟桌面**（多屏时是并集），
+    /// 拿它居中会把栏摆到两块屏的正中间 —— 单屏看不出来，双屏立刻露馅。
+    /// 贴边判定仍然用虚拟桌面外沿，那是另一回事（两块屏的交界不算屏幕边，是有意为之）。
+    /// </summary>
+    private (double Left, double Top, double Width, double Height) CurrentScreenBounds()
+    {
+        try
+        {
+            if (NativeMethods.TryGetMonitorRect(EnsureOurHandle(), out var rect))
+            {
+                var dpi = VisualTreeHelper.GetDpi(this);
+
+                double left = rect.Left / dpi.DpiScaleX;
+                double top = rect.Top / dpi.DpiScaleY;
+                double width = (rect.Right - rect.Left) / dpi.DpiScaleX;
+                double height = (rect.Bottom - rect.Top) / dpi.DpiScaleY;
+
+                if (width > 0 && height > 0) return (left, top, width, height);
+            }
+        }
+        catch
+        {
+            // 拿不到就退回整块虚拟桌面（单屏时两者一样）
+        }
+
+        return (SystemParameters.VirtualScreenLeft, SystemParameters.VirtualScreenTop,
+                SystemParameters.VirtualScreenWidth, SystemParameters.VirtualScreenHeight);
+    }
+
     private void MoveToDefaultPosition()
     {
-        // 一律按屏幕外沿算，不用 SystemParameters.WorkArea —— 那只代表任务栏让出来的区域，
-        // 任务栏在顶部/左侧时会凭空多出一段"避让距离"。
-        double vLeft = SystemParameters.VirtualScreenLeft;
-        double vTop = SystemParameters.VirtualScreenTop;
+        // 按"所在那块屏"的外沿算，不用 SystemParameters.WorkArea（那只代表任务栏让出来的区域，
+        // 任务栏在顶部/左侧时会凭空多出一段"避让距离"），也不用整块虚拟桌面（双屏会摆到中间）。
+        var screen = CurrentScreenBounds();
 
-        Left = vLeft + Math.Max(0, (SystemParameters.VirtualScreenWidth - ActualWidth) / 2);
+        Left = screen.Left + Math.Max(0, (screen.Width - ActualWidth) / 2);
 
         // 不贴屏幕最上沿：贴边自动隐藏的判定阈值是 12px，落到 6px 会一启动就被收纳起来。
         // 留 28px —— 还是在上边，但稳稳在阈值之外。
-        Top = vTop + 28;
+        Top = screen.Top + 28;
 
         UpdateTooltipPlacement();
     }
@@ -1083,11 +1114,8 @@ public partial class DockWindow : Window
     {
         if (!App.Settings.CenterOnScreen) return;
 
-        // 同 MoveToDefaultPosition：按屏幕外沿算，不按任务栏让出来的工作区算。
-        double vLeft = SystemParameters.VirtualScreenLeft;
-        double vTop = SystemParameters.VirtualScreenTop;
-        double vWidth = SystemParameters.VirtualScreenWidth;
-        double vHeight = SystemParameters.VirtualScreenHeight;
+        // 同 MoveToDefaultPosition：按"所在那块屏"的外沿算（双屏时不能拿整块虚拟桌面居中）
+        var screen = CurrentScreenBounds();
 
         bool horizontalEdge = _edgeSide is DockEdge.Left or DockEdge.Right;
         bool verticalEdge = _edgeSide is DockEdge.Top or DockEdge.Bottom;
@@ -1097,7 +1125,7 @@ public partial class DockWindow : Window
         {
             if (horizontalEdge) return;
 
-            double left = vLeft + Math.Max(0, (vWidth - ActualWidth) / 2);
+            double left = screen.Left + Math.Max(0, (screen.Width - ActualWidth) / 2);
 
             if (_edgeHidden)
             {
@@ -1112,7 +1140,7 @@ public partial class DockWindow : Window
         {
             if (verticalEdge) return;
 
-            double top = vTop + Math.Max(0, (vHeight - ActualHeight) / 2);
+            double top = screen.Top + Math.Max(0, (screen.Height - ActualHeight) / 2);
 
             if (_edgeHidden)
             {

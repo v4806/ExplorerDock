@@ -161,6 +161,30 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     public static extern bool IsIconic(IntPtr hWnd);
 
+    /// <summary>
+    /// 窗口是不是"未响应"（挂起、没在泵消息）。
+    ///
+    /// 用来决定任务栏按钮的补刀节奏：窗口一挂起，shell 会重新给它把按钮加回来，
+    /// 常规的几秒一补太慢，用户看到的就是"未响应的窗口又短暂出现在任务栏一会儿"。
+    /// </summary>
+    [DllImport("user32.dll")]
+    public static extern bool IsHungAppWindow(IntPtr hWnd);
+
+    /// <summary>
+    /// 给窗口挂一个我们自己的属性（跨进程可读，程序重启后也还在）。
+    ///
+    /// 用在"临时给未响应窗口加 WS_EX_TOOLWINDOW"这件事上：靠它区分
+    /// "这一位是我们加的"和"窗口本来就有"，才能在窗口恢复后只摘掉自己加的那一位。
+    /// </summary>
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern bool SetProp(IntPtr hWnd, string lpString, IntPtr hData);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern IntPtr GetProp(IntPtr hWnd, string lpString);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern IntPtr RemoveProp(IntPtr hWnd, string lpString);
+
     [DllImport("user32.dll", SetLastError = true)]
     public static extern IntPtr GetForegroundWindow();
 
