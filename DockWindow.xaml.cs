@@ -267,16 +267,27 @@ public partial class DockWindow : Window
                 // 抢不回来也要继续拖，最多是手感差一点
             }
 
-            try
-            {
-                DragMove();
-            }
-            catch
-            {
-                // 拖动被打断，忽略
-            }
+            bool allowHorizontal = CanDragHorizontal();
+            bool allowVertical = CanDragVertical();
 
-            FinishDrag();
+            if (allowHorizontal && allowVertical)
+            {
+                try
+                {
+                    DragMove();
+                }
+                catch
+                {
+                    // 拖动被打断，忽略
+                }
+
+                FinishDrag();
+            }
+            else
+            {
+                // 有一条轴不让动：DragMove 做不到单轴，只能自己跟鼠标（松手时由它收尾）
+                ManualDrag(allowHorizontal, allowVertical);
+            }
         };
 
         // 拖动别的窗口时 Windows 会临时把被拖窗口提到最前，我们的置顶可能被挤掉；
@@ -738,6 +749,12 @@ public partial class DockWindow : Window
         }
 
         RestoreEdgeState();
+
+        // 居中模式：启动时也要对齐一次 —— 只靠 OnRenderSizeChanged 的话，
+        // 尺寸没变化（绝大多数启动）就永远不会居中。
+        // 放在 RestoreEdgeState 之后：真在收纳状态时 ApplyCentering 会自己让位。
+        ApplyCentering();
+
         UpdateEdgeState();
     }
 
@@ -885,6 +902,10 @@ public partial class DockWindow : Window
         // （已经收纳到屏外时不要摆回来，否则会闪一下再被挪出去）
         if (_autoCenter && !_edgeHidden) MoveToDefaultPosition();
 
+        // 居中模式：尺寸一变就把该居中的那条轴重新对齐屏幕中线。
+        // 放在 MoveToDefaultPosition 之后 —— 它会写 Left/Top，顺序反了会把垂直居中覆盖掉。
+        if (App.Settings.CenterOnScreen) ApplyCentering();
+
         UpdateShadowBounds();
 
         // 收纳状态下尺寸变了（多了几行、滚动高度变化）：按新尺寸重算屏外位置，
@@ -923,6 +944,56 @@ public partial class DockWindow : Window
         UpdateTooltipPlacement();
     }
 
+    /// <summary>
+    /// 居中模式：把"该居中的那条轴"重新对齐屏幕中线。
+    /// 横幅模式对齐水平中线（宽度中点），堆叠模式对齐垂直中线（高度中点）；
+    /// 另一条轴一动不动 —— 用户把栏放哪儿就留在哪儿，不会突然弹到屏幕正中。
+    ///
+    /// 每次尺寸变化都要调（见 OnRenderSizeChanged）：之所以要"随尺寸保持居中"，
+    /// 就是因为按钮一多，栏只会朝右/朝下单向变长，中点会跑偏。
+    /// </summary>
+    public void ApplyCentering()
+    {
+        if (!App.Settings.CenterOnScreen) return;
+        if (_edgeHidden) return;   // 收纳状态由贴边逻辑接管，别去抢
+
+        var area = SystemParameters.WorkArea;
+
+        if (StackMode)
+        {
+            Top = area.Top + Math.Max(0, (area.Height - ActualHeight) / 2);
+        }
+        else
+        {
+            Left = area.Left + Math.Max(0, (area.Width - ActualWidth) / 2);
+        }
+
+        UpdateTooltipPlacement();
+    }
+
+    /// <summary>
+    /// 这条轴现在还能不能被拖动。
+    ///
+    /// 居中模式下"被自动居中的那条轴"本来就不听拖动的（一松手/一改尺寸就被拉回中线），
+    /// 所以锁定只管另一条轴：横幅锁上下、堆叠锁左右。
+    /// 没开居中时，锁定就是整条都不动 —— 与老行为一致。
+    /// </summary>
+    private bool CanDragHorizontal()
+    {
+        if (!App.Settings.DockLocked) return true;
+        if (!App.Settings.CenterOnScreen) return false;
+
+        return StackMode;   // 堆叠模式锁的是左右
+    }
+
+    private bool CanDragVertical()
+    {
+        if (!App.Settings.DockLocked) return true;
+        if (!App.Settings.CenterOnScreen) return false;
+
+        return !StackMode;   // 横幅模式锁的是上下
+    }
+
     // ---------- 贴边自动隐藏 ----------
 
     /// <summary>贴边判定与收纳所依据的最小间距：与 ClampToScreen 保持一致。</summary>
@@ -939,6 +1010,58 @@ public partial class DockWindow : Window
         ClampToScreen();
         SavePosition();
         UpdateEdgeState();
+    }
+
+    /// <summary>
+    /// 单轴拖动：只让允许的那条轴跟着鼠标走。
+    ///
+    /// DragMove() 是系统级的窗口拖动循环，两轴一起动、也拦不住其中一条，
+    /// 所以"锁定了一条轴"或"另一条轴归居中管"时只能自己实现。
+    /// 收尾（ClampToScreen / 保存位置 / 贴边判定）统一交给 FinishDrag。
+    /// </summary>
+    private void ManualDrag(bool allowHorizontal, bool allowVertical)
+    {
+        if (!allowHorizontal && !allowVertical)
+        {
+            FinishDrag();
+            return;
+        }
+
+        if (!NativeMethods.GetCursorPos(out var start))
+        {
+            FinishDrag();
+            return;
+        }
+
+        double startLeft = Left;
+        double startTop = Top;
+        var dpi = VisualTreeHelper.GetDpi(this);
+
+        Mouse.Capture(RootBorder);
+
+        void OnMove(object? sender, MouseEventArgs args)
+        {
+            if (!NativeMethods.GetCursorPos(out var now)) return;
+
+            // 物理像素差 → DIP：Left/Top 用的是 DIP
+            double dx = (now.X - start.X) / dpi.DpiScaleX;
+            double dy = (now.Y - start.Y) / dpi.DpiScaleY;
+
+            if (allowHorizontal) Left = startLeft + dx;
+            if (allowVertical) Top = startTop + dy;
+        }
+
+        void OnUp(object? sender, MouseButtonEventArgs args)
+        {
+            PreviewMouseMove -= OnMove;
+            PreviewMouseLeftButtonUp -= OnUp;
+            Mouse.Capture(null);
+
+            FinishDrag();
+        }
+
+        PreviewMouseMove += OnMove;
+        PreviewMouseLeftButtonUp += OnUp;
     }
 
     /// <summary>
@@ -2561,6 +2684,20 @@ public partial class DockWindow : Window
                 App.Settings.ShowFullTitle = v;
                 App.Settings.Save();
                 Host.RebuildDockItems();
+            }),
+            MenuSeparator(),
+            // 居中与锁定放在这里，而不是贴边设置窗里：它们管的是"栏怎么摆"，
+            // 跟贴边那三个数值不是一回事
+            CheckItem("尺寸变化时保持居中", App.Settings.CenterOnScreen, v =>
+            {
+                App.Settings.CenterOnScreen = v;
+                App.Settings.Save();
+                ApplyCentering();
+            }),
+            CheckItem("锁定位置（不可拖动）", App.Settings.DockLocked, v =>
+            {
+                App.Settings.DockLocked = v;
+                App.Settings.Save();
             }),
             MenuSeparator(),
             layoutBanner,

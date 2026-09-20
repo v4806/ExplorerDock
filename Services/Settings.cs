@@ -147,6 +147,19 @@ public sealed class Settings
     /// <summary>按钮上显示完整标题而不是截断到 145px。</summary>
     public bool ShowFullTitle { get; set; } = true;
 
+    /// <summary>
+    /// 尺寸变化时保持居中：横幅模式对齐屏幕**水平**中线（宽度中点），堆叠模式对齐**垂直**中线。
+    /// 默认关。开着的时候另一条轴仍由用户自己摆放 —— 只把该居中的那条轴钉在中线上。
+    /// </summary>
+    public bool CenterOnScreen { get; set; }
+
+    /// <summary>
+    /// 锁定悬浮栏位置。
+    /// 居中模式下只锁"不被自动居中的那条轴"（横幅锁上下、堆叠锁左右）——
+    /// 被居中的那条轴本来就不听拖动的，锁它没有意义。
+    /// </summary>
+    public bool DockLocked { get; set; }
+
     /// <summary>开机自启。</summary>
     public bool RunAtStartup { get; set; } = true;
 
