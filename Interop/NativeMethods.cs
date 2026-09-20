@@ -94,6 +94,10 @@ internal static class NativeMethods
     public const uint GW_HWNDNEXT = 2;
 
     public const uint WM_CLOSE = 0x0010;
+
+    /// <summary>激活请求：到达时系统还没把前台交出去，这是问"点击前谁在前台"的唯一时机。</summary>
+    public const uint WM_MOUSEACTIVATE = 0x0021;
+
     public const uint WM_GETICON = 0x007F;
     public const int ICON_SMALL = 0;
     public const int ICON_BIG = 1;

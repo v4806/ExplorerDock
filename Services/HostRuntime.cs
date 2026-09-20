@@ -53,6 +53,14 @@ internal sealed class HostRuntime : IDisposable
         if (App.Settings.TakeoverEnabled) _host.SetTakeover(true);
         _host.Start();
 
+        // 计划任务（「以管理员身份运行」时的自启用它）**只有管理员权限才建得出来**，
+        // 界面进程永远是普通权限，所以由我们（提权进程）在这儿校验并补齐。
+        // 任务已经正确时这个调用只跑一次 schtasks /Query，开销可以忽略。
+        if (App.Settings.RunAtStartup && App.Settings.RunElevated)
+        {
+            StartupRegistration.EnsureElevatedTask(Environment.ProcessPath);
+        }
+
         AltTabController.Log($"host: keyboard installed={_host.KeyboardInstalled}");
 
         StartWatchdog();

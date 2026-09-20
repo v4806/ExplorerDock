@@ -1387,76 +1387,8 @@ public partial class App : Application
     /// 而计划任务能标 /RL HIGHEST，登录时静默地以管理员身份跑起来，不弹 UAC。
     /// </summary>
     private void ApplyStartupRegistration()
-    {
-        try
-        {
-            var exe = Environment.ProcessPath;
-            bool valid = !string.IsNullOrWhiteSpace(exe);
+        => StartupRegistration.Apply(Settings.RunAtStartup, Settings.RunElevated, Environment.ProcessPath);
 
-            using (var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
-                @"Software\Microsoft\Windows\CurrentVersion\Run", writable: true))
-            {
-                if (key is not null)
-                {
-                    if (Settings.RunAtStartup && !Settings.RunElevated && valid)
-                    {
-                        key.SetValue(StartupValueName, $"\"{exe}\"");
-                    }
-                    else
-                    {
-                        key.DeleteValue(StartupValueName, throwOnMissingValue: false);
-                    }
-                }
-            }
-
-            ApplyStartupTask(Settings.RunAtStartup && Settings.RunElevated && valid, exe);
-        }
-        catch
-        {
-            // 注册自启失败不影响主功能
-        }
-    }
-
-    /// <summary>创建或删除"登录时以最高权限运行"的计划任务（需要管理员权限，失败就忽略）。</summary>
-    private static void ApplyStartupTask(bool create, string? exe)
-    {
-        try
-        {
-            var start = new ProcessStartInfo("schtasks.exe")
-            {
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            };
-
-            if (create && !string.IsNullOrWhiteSpace(exe))
-            {
-                start.ArgumentList.Add("/Create");
-                start.ArgumentList.Add("/TN");
-                start.ArgumentList.Add(StartupValueName);
-                start.ArgumentList.Add("/TR");
-                start.ArgumentList.Add(exe);   // 引号交给运行时按需补
-                start.ArgumentList.Add("/SC");
-                start.ArgumentList.Add("ONLOGON");
-                start.ArgumentList.Add("/RL");
-                start.ArgumentList.Add("HIGHEST");
-                start.ArgumentList.Add("/F");
-            }
-            else
-            {
-                start.ArgumentList.Add("/Delete");
-                start.ArgumentList.Add("/TN");
-                start.ArgumentList.Add(StartupValueName);
-                start.ArgumentList.Add("/F");
-            }
-
-            using var process = Process.Start(start);
-            process?.WaitForExit(5000);
-        }
-        catch
-        {
-            // 没有权限、或者 schtasks 不可用：忽略
-        }
-    }
 
     // ---------- 主题 ----------
 

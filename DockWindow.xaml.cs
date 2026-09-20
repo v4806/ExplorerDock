@@ -318,6 +318,45 @@ public partial class DockWindow : Window
             handle,
             NativeMethods.GWL_EXSTYLE,
             (style | NativeMethods.WS_EX_TOOLWINDOW) & ~NativeMethods.WS_EX_APPWINDOW);
+
+        // 监听 WM_MOUSEACTIVATE：点悬浮栏时"我点之前你在用哪个窗口"，只有那一刻问得到
+        HwndSource.FromHwnd(handle)?.AddHook(DockWndProc);
+    }
+
+    /// <summary>点击悬浮栏之前，用户正在用的那个窗口。</summary>
+    private IntPtr _foregroundBeforeActivate = IntPtr.Zero;
+    private long _foregroundBeforeActivateAt;
+
+    /// <summary>
+    /// 为什么非得在 WM_MOUSEACTIVATE 里记：悬浮栏虽然带 WS_EX_TOOLWINDOW，但**照样会被点击激活**，
+    /// 等 MouseDown 跑到我们手里时 GetForegroundWindow() 已经是悬浮栏自己了 ——
+    /// 于是"点已在前台的窗口应该最小化"永远判不出来（用户报的"左键再点只会再显示一次"）。
+    /// WM_MOUSEACTIVATE 是系统把前台交出去之前的最后一刻，这时问到才是用户刚才在看的窗口。
+    /// </summary>
+    private IntPtr DockWndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (msg == NativeMethods.WM_MOUSEACTIVATE)
+        {
+            var foreground = NativeMethods.GetForegroundWindow();
+
+            if (foreground != IntPtr.Zero && foreground != hwnd)
+            {
+                _foregroundBeforeActivate = foreground;
+                _foregroundBeforeActivateAt = Environment.TickCount64;
+            }
+        }
+
+        return IntPtr.Zero;
+    }
+
+    /// <summary>这个窗口是不是"用户点按钮之前正在用的那个"（一秒内的记录才算数）。</summary>
+    private bool IsFreshForeground(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero || _foregroundBeforeActivate != hwnd) return false;
+        if (Environment.TickCount64 - _foregroundBeforeActivateAt > 1000) return false;
+
+        // 已经最小化的窗口：用户要的是"切回来"，不是再最小化一次
+        return !NativeMethods.IsIconic(hwnd);
     }
 
     // ---------- 外观 ----------
@@ -1887,9 +1926,9 @@ public partial class DockWindow : Window
             if (target == IntPtr.Zero || !NativeMethods.IsWindow(target)) return;
             if (NativeMethods.GetForegroundWindow() == target) return;
 
-            // 之前的前台得确实是悬浮栏上的某个文件夹窗口，才值得还
+            // 之前的前台得确实是悬浮栏上的某个窗口，才值得还
             if (!_items.Keys.Any(key => key.Handle == target)) return;
-            if (!IsFrontApplicationWindow(target)) return;
+            if (!IsFrontApplicationWindow(target) && !IsFreshForeground(target)) return;
 
             NativeMethods.SetForegroundWindow(target);
             Diag($"press: restore foreground 0x{target.ToInt64():X}");
@@ -1909,13 +1948,21 @@ public partial class DockWindow : Window
     {
         if (!NativeMethods.IsWindow(hwnd)) return;
 
-        bool front = IsFrontApplicationWindow(hwnd);
+        // 两条路都算"已经在我面前"：
+        //   ① 按 Z 序看它是不是最上面的应用窗口；
+        //   ② 它就是用户点击悬浮栏之前正在用的那个窗口（WM_MOUSEACTIVATE 记下来的）。
+        // 只靠 ① 会漏 —— 任何置顶工具窗（录屏条、输入法状态窗、音量条…）挡在中间都会让 ① 判 false，
+        // 用户看到的现象就是"再点一次只是又显示一遍、最小化不了"。
+        bool front = IsFrontApplicationWindow(hwnd) || IsFreshForeground(hwnd);
         bool currentTab = tabIndex < 0 || Host.WindowHost.SelectedTab(hwnd) == tabIndex;
 
         // 点击行为留一条日志：别的机器上"点了不最小化"时，靠它看清是哪一步判错的
+        var zFirst = FindFrontApplicationWindow(IntPtr.Zero, out var zClass);
         DiagClick(
             $"toggle hwnd=0x{hwnd.ToInt64():X} tab={tabIndex} class={NativeMethods.GetClassNameSafe(hwnd)} " +
-            $"iconic={NativeMethods.IsIconic(hwnd)} front={front} currentTab={currentTab} fg=0x{NativeMethods.GetForegroundWindow().ToInt64():X}");
+            $"iconic={NativeMethods.IsIconic(hwnd)} front={front} currentTab={currentTab} " +
+            $"fgBefore=0x{_foregroundBeforeActivate.ToInt64():X} fresh={IsFreshForeground(hwnd)} " +
+            $"zFirst=0x{zFirst.ToInt64():X}/{zClass} fg=0x{NativeMethods.GetForegroundWindow().ToInt64():X}");
 
         if (!NativeMethods.IsIconic(hwnd) && front && currentTab)
         {
@@ -2156,8 +2203,29 @@ public partial class DockWindow : Window
         var foreground = NativeMethods.GetForegroundWindow();
         if (foreground != IntPtr.Zero && NativeMethods.GetAncestor(foreground, NativeMethods.GA_ROOT) == target) return true;
 
+        return FindFrontApplicationWindow(target, out _) == target;
+    }
+
+    /// <summary>
+    /// 沿 Z 序从悬浮栏往下找"第一个真正的应用窗口"（也就是用户点击之前正在看的那个）。
+    ///
+    /// 三层跳过，缺一层都会误判：
+    ///   ① 不可见窗口；
+    ///   ② **本程序自己的窗口** —— 悬浮栏、阴影层、剪贴板面板、托盘菜单宿主都在这一列，
+    ///      它们以前只是靠"有 owner"侥幸被跳过，不该依赖这一点；
+    ///   ③ 带 WS_EX_TOOLWINDOW / WS_EX_TRANSPARENT 的窗口（各种浮条、覆盖层）。
+    ///
+    /// 别的窗口最后才按 owner 与 shell 类名过滤，而且"先认 target 本身"的顺序不能动：
+    /// Win10 的文件资源管理器窗口带 owner，放到过滤之后就永远认不出它，
+    /// 表现就是点悬浮栏只能切前台、最小化不了。
+    /// target 传 IntPtr.Zero 时只做诊断用 —— 返回谁挡在最前面。
+    /// </summary>
+    private IntPtr FindFrontApplicationWindow(IntPtr target, out string className)
+    {
+        className = string.Empty;
+
         var handle = EnsureOurHandle();
-        if (handle == IntPtr.Zero) return false;
+        if (handle == IntPtr.Zero) return IntPtr.Zero;
 
         var current = handle;
         int guard = 0;
@@ -2166,18 +2234,27 @@ public partial class DockWindow : Window
         {
             if (!NativeMethods.IsWindowVisible(current)) continue;
 
-            // 先认目标本身，再按 owner/类名过滤别的窗口。
-            // Win10 的文件资源管理器窗口带 owner，原来会被下面的过滤掉，
-            // 结果"最前的应用窗口"永远不是它 → 点悬浮栏只能切前台、最小化不了。
-            if (current == target) return true;
+            NativeMethods.GetWindowThreadProcessId(current, out uint pid);
+            if ((int)pid == Environment.ProcessId) continue;
+
+            if (current == target)
+            {
+                className = NativeMethods.GetClassNameSafe(current);
+                return current;
+            }
+
+            long extended = NativeMethods.GetWindowLongPtr(current, NativeMethods.GWL_EXSTYLE);
+            if ((extended & NativeMethods.WS_EX_TOOLWINDOW) != 0) continue;
+            if ((extended & NativeMethods.WS_EX_TRANSPARENT) != 0) continue;
 
             if (NativeMethods.GetWindow(current, NativeMethods.GW_OWNER) != IntPtr.Zero) continue;
             if (IsShellWindow(NativeMethods.GetClassNameSafe(current))) continue;
 
-            return false;
+            className = NativeMethods.GetClassNameSafe(current);
+            return current;
         }
 
-        return false;
+        return IntPtr.Zero;
     }
 
     private static bool IsShellWindow(string className) => className switch
