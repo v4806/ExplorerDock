@@ -898,29 +898,47 @@ public partial class DockWindow : Window
     {
         base.OnRenderSizeChanged(info);
 
-        // 用户没手动挪过位置时，宽度变化后保持在底部居中
-        // （已经收纳到屏外时不要摆回来，否则会闪一下再被挪出去）
-        if (_autoCenter && !_edgeHidden) MoveToDefaultPosition();
-
-        // 居中模式：尺寸一变就把该居中的那条轴重新对齐屏幕中线。
-        // 放在 MoveToDefaultPosition 之后 —— 它会写 Left/Top，顺序反了会把垂直居中覆盖掉。
-        if (App.Settings.CenterOnScreen) ApplyCentering();
+        // 贴边位置的锚定用 info 里的新旧尺寸就能算，不用等布局走完
+        //
+        // 窗口改尺寸时左上角是锚点 —— 贴左边/上边天然没事，贴右边/底边就不行：
+        // 高度一变小，底边跟着往上退，和屏幕底边之间就露出空隙。
+        // 用户看到的就是"关掉几个窗口后悬浮栏悬空了，可它还认为自己是贴边的、鼠标一走还会自动隐藏"。
+        ReanchorEdgeDock(info);
 
         UpdateShadowBounds();
 
-        // 收纳状态下尺寸变了（多了几行、滚动高度变化）：按新尺寸重算屏外位置，
-        // 保证留在屏内的宽度还是设置的那个值
-        if (_edgeHidden && _edgeSide != DockEdge.None)
-        {
-            ComputeEdgeHiddenPosition(_edgeSide, out var hiddenLeft, out var hiddenTop);
+        // 其余位置收尾一律延后一轮再做。
+        //
+        // 关键：这里直接算会读到**上一次的 ActualWidth/ActualHeight**（WPF 要等布局走完才更新），
+        // 于是"按新宽度居中"算出来还是旧宽度对应的位置 ——
+        // 用户看到的就是"尺寸变了，可它没重新居中"（测下来能差 60 多像素）。
+        Dispatcher.BeginInvoke(new Action(ApplySizeDependentPosition), DispatcherPriority.Background);
+    }
 
-            _edgeSelfMove = true;
-            Left = hiddenLeft;
-            Top = hiddenTop;
-            _edgeSelfMove = false;
+    /// <summary>
+    /// 尺寸变化后的位置收尾。必须在布局走完、ActualWidth/ActualHeight 已经是新值之后调用，
+    /// 否则居中会按旧尺寸算（见 OnRenderSizeChanged 的注释）。
+    /// </summary>
+    private void ApplySizeDependentPosition()
+    {
+        // ① 用户没手动挪过位置：回到默认位置（水平居中 + 距顶 28）
+        if (_autoCenter && !_edgeHidden) MoveToDefaultPosition();
 
-            UpdateShadowBounds();
-        }
+        // ② 居中模式：把该居中的那条轴对齐屏幕中线（放在 ① 之后，否则会被 ① 覆盖）
+        if (App.Settings.CenterOnScreen) ApplyCentering();
+
+        // ③ 收纳中：按新尺寸重算屏外位置（屏内留多少像素要跟着变），
+        //    这一步放在 ② 之后 —— ② 会把居中的那条轴记进展开位置，重算时正好用上。
+        if (!_edgeHidden || _edgeSide == DockEdge.None) return;
+
+        ComputeEdgeHiddenPosition(_edgeSide, out var hiddenLeft, out var hiddenTop);
+
+        _edgeSelfMove = true;
+        Left = hiddenLeft;
+        Top = hiddenTop;
+        _edgeSelfMove = false;
+
+        UpdateShadowBounds();
     }
 
     private static bool IsOnScreen(double left, double top)
@@ -949,26 +967,112 @@ public partial class DockWindow : Window
     /// 横幅模式对齐水平中线（宽度中点），堆叠模式对齐垂直中线（高度中点）；
     /// 另一条轴一动不动 —— 用户把栏放哪儿就留在哪儿，不会突然弹到屏幕正中。
     ///
-    /// 每次尺寸变化都要调（见 OnRenderSizeChanged）：之所以要"随尺寸保持居中"，
-    /// 就是因为按钮一多，栏只会朝右/朝下单向变长，中点会跑偏。
+    /// 三种情况要分清：
+    ///   ① 要居中的那条轴正好就是贴边的那条轴 → 让位给贴边（既贴底边又垂直居中做不到）；
+    ///   ② 正在收纳（窗口已经滑出屏外）→ 只把"下次展开的位置"记成居中的，不去动屏外的窗口；
+    ///   ③ 其余情况 → 直接挪。
     /// </summary>
     public void ApplyCentering()
     {
         if (!App.Settings.CenterOnScreen) return;
-        if (_edgeHidden) return;   // 收纳状态由贴边逻辑接管，别去抢
 
         var area = SystemParameters.WorkArea;
 
-        if (StackMode)
+        bool horizontalEdge = _edgeSide is DockEdge.Left or DockEdge.Right;
+        bool verticalEdge = _edgeSide is DockEdge.Top or DockEdge.Bottom;
+        bool horizontal = !StackMode;   // 横幅管水平，堆叠管垂直
+
+        if (horizontal)
         {
-            Top = area.Top + Math.Max(0, (area.Height - ActualHeight) / 2);
+            if (horizontalEdge) return;
+
+            double left = area.Left + Math.Max(0, (area.Width - ActualWidth) / 2);
+
+            if (_edgeHidden)
+            {
+                _edgeDockLeft = left;
+                ReapplyEdgeHiddenPosition();   // 收纳位置里非贴边的那条轴取的就是它，得重算一次
+                return;
+            }
+
+            Left = left;
         }
         else
         {
-            Left = area.Left + Math.Max(0, (area.Width - ActualWidth) / 2);
+            if (verticalEdge) return;
+
+            double top = area.Top + Math.Max(0, (area.Height - ActualHeight) / 2);
+
+            if (_edgeHidden)
+            {
+                _edgeDockTop = top;
+                ReapplyEdgeHiddenPosition();
+                return;
+            }
+
+            Top = top;
         }
 
         UpdateTooltipPlacement();
+    }
+
+    /// <summary>
+    /// 收纳中：按当前的 _edgeDockLeft/_edgeDockTop 重算一次屏外位置并挪过去。
+    ///
+    /// 用在"展开位置刚被改掉"的时候（居中把它记成了新值）。收纳位置里那条**非贴边**的轴
+    /// 正是取 _edgeDock*，不重算的话，用户看到的就是
+    /// "这一次收起来之后没居中，鼠标碰一下让它出来才发现是居中的"。
+    /// </summary>
+    private void ReapplyEdgeHiddenPosition()
+    {
+        if (!_edgeHidden || _edgeSide == DockEdge.None) return;
+
+        ComputeEdgeHiddenPosition(_edgeSide, out var left, out var top);
+
+        if (_edgeAnimating)
+        {
+            // 正在往屏外滑：只改终点，别重新起一段（否则会看到它"顿"一下）
+            _edgeToLeft = left;
+            _edgeToTop = top;
+            return;
+        }
+
+        AnimateEdgeTo(left, top, animated: true, hiding: true);
+    }
+
+    /// <summary>
+    /// 贴边时尺寸变了：按新宽高把"贴边时的位置"重新贴回那条边。
+    ///
+    /// 只处理贴右/贴下 —— 窗口改尺寸时左上角是锚点，贴左/贴上天然跟着锚点走，
+    /// 贴右/贴下则会和屏幕边之间露出空隙（高度变小 → 底边往上退）。
+    /// </summary>
+    private void ReanchorEdgeDock(SizeChangedInfo info)
+    {
+        if (_edgeSide is not (DockEdge.Bottom or DockEdge.Right)) return;
+        if (info.PreviousSize.Width <= 1 || info.PreviousSize.Height <= 1) return;
+
+        if (_edgeSide == DockEdge.Bottom)
+        {
+            double delta = info.NewSize.Height - info.PreviousSize.Height;
+            if (Math.Abs(delta) < 0.01) return;
+
+            _edgeDockTop -= delta;   // 保持底边不动
+        }
+        else
+        {
+            double delta = info.NewSize.Width - info.PreviousSize.Width;
+            if (Math.Abs(delta) < 0.01) return;
+
+            _edgeDockLeft -= delta;  // 保持右边不动
+        }
+
+        // 展开状态下窗口就摆在这个位置，得跟着走；收纳中则只更新"下次展开"的位置
+        if (_edgeHidden) return;
+
+        _edgeSelfMove = true;
+        Left = _edgeDockLeft;
+        Top = _edgeDockTop;
+        _edgeSelfMove = false;
     }
 
     /// <summary>
@@ -1010,6 +1114,11 @@ public partial class DockWindow : Window
         ClampToScreen();
         SavePosition();
         UpdateEdgeState();
+
+        // 居中模式：松手后把该居中的那条轴弹回屏幕中线。
+        // 拖动过程不拦（手感要自然），但"居中"是条一直成立的规则 ——
+        // 不是只有改尺寸那一下才生效。
+        if (App.Settings.CenterOnScreen) ApplyCentering();
     }
 
     /// <summary>
