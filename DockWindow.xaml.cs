@@ -250,6 +250,15 @@ public partial class DockWindow : Window
             var current = e.GetPosition(this);
             if (Math.Abs(current.X - _pressPoint.X) < 4 && Math.Abs(current.Y - _pressPoint.Y) < 4) return;
 
+            bool allowHorizontal = CanDragHorizontal();
+            bool allowVertical = CanDragVertical();
+
+            // 锁定位置（且没有"居中替它管一条轴"的情况）：两条轴都不能动 —— 那就什么都别做。
+            //
+            // 这里绝对不能落到 FinishDrag：它带一次贴边判定，而窗口因为没被拖动、还贴着原来那条边，
+            // 判定一成立就当场把悬浮栏收走 —— 用户只是按住在它身上动了一下鼠标，栏就"自己藏了"。
+            if (!allowHorizontal && !allowVertical) return;
+
             _dragging = true;
 
             // 拖之前先把前台抢回悬浮栏。
@@ -266,9 +275,6 @@ public partial class DockWindow : Window
             {
                 // 抢不回来也要继续拖，最多是手感差一点
             }
-
-            bool allowHorizontal = CanDragHorizontal();
-            bool allowVertical = CanDragVertical();
 
             if (allowHorizontal && allowVertical)
             {
@@ -1130,11 +1136,9 @@ public partial class DockWindow : Window
     /// </summary>
     private void ManualDrag(bool allowHorizontal, bool allowVertical)
     {
-        if (!allowHorizontal && !allowVertical)
-        {
-            FinishDrag();
-            return;
-        }
+        // 两条轴都锁着：调用方已经挡掉了，这里再兜一层 —— 直接返回，不做任何收尾动作
+        // （FinishDrag 会跑贴边判定，窗口没动、还贴着边，就会被当场收走）
+        if (!allowHorizontal && !allowVertical) return;
 
         if (!NativeMethods.GetCursorPos(out var start))
         {
