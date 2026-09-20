@@ -55,6 +55,15 @@ public partial class DockWindow : Window
     /// <summary>本次按下之后收到过多少个移动事件（拖动诊断用）。</summary>
     private int _pressMoves;
 
+    /// <summary>
+    /// 这一次按下已经升级成"拖动悬浮栏"了。
+    ///
+    /// 拖动挂在窗口级（按住任意位置都能拖），按钮自己看不出来 —— 不记这一笔的话，
+    /// 在按钮上按住拖完整条悬浮栏、松手时按钮还会收到一次点击，
+    /// 于是窗口莫名其妙被切换或最小化。松手时按钮靠它跳过点击。
+    /// </summary>
+    private bool _draggedSincePress;
+
     /// <summary>按下次数的序号（拖动诊断用）。</summary>
     private static int _pressSeq;
 
@@ -261,6 +270,7 @@ public partial class DockWindow : Window
             _pressPoint = e.GetPosition(this);
             _pressMoves = 0;
             _dragTrace.Clear();
+            _draggedSincePress = false;
 
             if (NativeMethods.GetCursorPos(out var pressScreen))
             {
@@ -326,6 +336,7 @@ public partial class DockWindow : Window
             if (!allowHorizontal && !allowVertical) return;
 
             _dragging = true;
+            _draggedSincePress = true;
 
             int dragSeq = Interlocked.Increment(ref _dragSeq);
             var ours = EnsureOurHandle();
@@ -2219,6 +2230,15 @@ public partial class DockWindow : Window
 
         container.MouseLeftButtonUp += (_, e) =>
         {
+            // 这一次按下其实是在拖悬浮栏（拖动挂在窗口级，按钮自己看不出来）：
+            // 松手只结束拖动，不算点了这个按钮 —— 否则拖完一次，窗口就被切走或最小化了。
+            if (_draggedSincePress)
+            {
+                _draggedSincePress = false;
+                e.Handled = true;
+                return;
+            }
+
             ToggleTab(visual.Handle, visual.TabIndex);
             e.Handled = true;
         };
