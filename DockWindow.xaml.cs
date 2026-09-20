@@ -46,6 +46,21 @@ public partial class DockWindow : Window
     private bool _dragging;
     private Point _pressPoint;
 
+    /// <summary>按下鼠标时的光标屏幕坐标（拖动诊断用）。</summary>
+    private (double X, double Y) _pressScreen;
+
+    /// <summary>拖动过程中的窗口坐标轨迹（最多 8 条，拖动诊断用）。</summary>
+    private readonly List<string> _dragTrace = new();
+
+    /// <summary>本次按下之后收到过多少个移动事件（拖动诊断用）。</summary>
+    private int _pressMoves;
+
+    /// <summary>按下次数的序号（拖动诊断用）。</summary>
+    private static int _pressSeq;
+
+    /// <summary>原生 WM_MOUSEMOVE 收到的条数（拖动诊断用）。</summary>
+    private int _nativeMoves;
+
     // ---------- 贴边自动隐藏 ----------
 
     /// <summary>当前靠在哪条屏幕边上（None = 没贴边）。</summary>
@@ -224,7 +239,11 @@ public partial class DockWindow : Window
         LocationChanged += (_, _) =>
         {
             // 拖动过程中就把窗口限制在屏幕内，免得被拖出屏幕或贴死在边缘
-            if (_dragging) ClampToScreen();
+            if (_dragging)
+            {
+                ClampToScreen();
+                TraceDragPosition();
+            }
             UpdateShadowBounds();
 
             // 贴边即判定：位置一变就重新判断靠没靠边（拖动中会被内部跳过，
@@ -238,7 +257,52 @@ public partial class DockWindow : Window
         PreviewMouseLeftButtonDown += (_, e) =>
         {
             if (_interactionLocked) return;
+
             _pressPoint = e.GetPosition(this);
+            _pressMoves = 0;
+            _dragTrace.Clear();
+
+            if (NativeMethods.GetCursorPos(out var pressScreen))
+            {
+                _pressScreen = (pressScreen.X, pressScreen.Y);
+            }
+
+            // 这里**不再主动抢前台**。
+            //
+            // 旧代码在按下时 ForceForeground，是为了让系统拖动循环（DragMove）有个激活窗口可用；
+            // 现在拖动改由 ManualDrag 自己跟鼠标，不需要前台，而"点击就激活"恰恰是压住鼠标消息、
+            // 让第一次快速拖动变成残影的元凶（DockWndProc 里已用 MA_NOACTIVATE 挡掉系统那次激活）。
+            var ours = EnsureOurHandle();
+
+            // 自己捕获鼠标。
+            //
+            // 第一次点击时，系统要先把前台交给悬浮栏，这一段会**阻塞消息派发**：
+            // 等我们处理到"按下"这条消息时，用户快速拖动已经让光标飞出悬浮栏几百像素，
+            // 鼠标不在窗口上，系统就不再投递移动消息 —— 拖动永远触发不了（日志实测：
+            // 按下点换算出的光标与 GetCursorPos 读到的最多差 744px）。
+            // 自己捕获一次就不看激活脸色：鼠标跑到屏幕哪儿，移动事件都还送到这儿。
+            // 用 SubTree 而不是 Element —— 按钮这类子元素照旧能收到点击。
+            try
+            {
+                Mouse.Capture(this, CaptureMode.SubTree);
+            }
+            catch
+            {
+                // 捕获失败也能用，只是第一次快速拖动仍有可能丢事件
+            }
+
+            _nativeMoves = 0;
+
+            DiagDrag($"#{Interlocked.Increment(ref _pressSeq)} press " +
+                $"at=({_pressPoint.X:0},{_pressPoint.Y:0}) screen=({_pressScreen.X:0},{_pressScreen.Y:0}) " +
+                $"fgIsOurs={NativeMethods.GetForegroundWindow() == ours} win=({Left:0},{Top:0}) " +
+                $"captured={Mouse.Captured == this}");
+        };
+
+        // 松手放开捕获（真的拖动时由 ManualDrag 自己收尾）
+        PreviewMouseLeftButtonUp += (_, _) =>
+        {
+            if (Mouse.Captured == this) Mouse.Capture(null);
         };
 
         PreviewMouseMove += (_, e) =>
@@ -246,6 +310,8 @@ public partial class DockWindow : Window
             if (_interactionLocked) return;
             if (e.LeftButton != MouseButtonState.Pressed) return;
             if (_dragging) return;
+
+            _pressMoves++;
 
             var current = e.GetPosition(this);
             if (Math.Abs(current.X - _pressPoint.X) < 4 && Math.Abs(current.Y - _pressPoint.Y) < 4) return;
@@ -261,39 +327,36 @@ public partial class DockWindow : Window
 
             _dragging = true;
 
-            // 拖之前先把前台抢回悬浮栏。
+            int dragSeq = Interlocked.Increment(ref _dragSeq);
+            var ours = EnsureOurHandle();
+            double dragFromLeft = Left;
+            double dragFromTop = Top;
+
+            // 这里**不再抢前台**。
             //
-            // 按住按钮时我们会"把前台还给点之前那个窗口"（见 RestoreForegroundOnPress），
-            // 而系统的窗口拖动循环要求窗口是激活的 —— 不抢回来，拖动期间窗口根本不跟随鼠标，
-            // 只有松手之后才"瞬间跳"到鼠标位置（用户报的就是这个现象）。
-            // 把手没这问题，因为把手不还前台。
-            try
-            {
-                NativeMethods.SetForegroundWindow(EnsureOurHandle());
-            }
-            catch
-            {
-                // 抢不回来也要继续拖，最多是手感差一点
-            }
+            // 旧代码在拖动前 ForceForeground，是为了让系统拖动循环（DragMove）有个激活窗口可用；
+            // 现在拖动由 ManualDrag 自己用 GetCursorPos 跟鼠标，不看激活状态，
+            // 抢前台只会白把用户正在用的窗口顶下去。
 
-            if (allowHorizontal && allowVertical)
-            {
-                try
-                {
-                    DragMove();
-                }
-                catch
-                {
-                    // 拖动被打断，忽略
-                }
+            _dragTrace.Clear();
 
-                FinishDrag();
-            }
-            else
-            {
-                // 有一条轴不让动：DragMove 做不到单轴，只能自己跟鼠标（松手时由它收尾）
-                ManualDrag(allowHorizontal, allowVertical);
-            }
+            DiagDrag($"#{dragSeq} start moves={_pressMoves} nativeMoves={_nativeMoves} press=({_pressPoint.X:0},{_pressPoint.Y:0}) cur=({current.X:0},{current.Y:0}) " +
+                $"pressScreen=({_pressScreen.X:0},{_pressScreen.Y:0}) " +
+                $"fgIsOurs={NativeMethods.GetForegroundWindow() == ours} " +
+                $"mode={(allowHorizontal && allowVertical ? "both" : $"h={allowHorizontal} v={allowVertical}")} " +
+                $"from=({dragFromLeft:0},{dragFromTop:0})");
+
+            // 一律自己跟鼠标，不再用系统的拖动循环（DragMove）。
+            //
+            // DragMove 要求窗口已经激活，而"启动后第一次点击"恰恰卡在激活那一段上 ——
+            // 那一次拖动会整个无效。ManualDrag 用 GetCursorPos 做增量跟随，不看激活状态，
+            // 顺带还能两条轴分别开关。
+            ManualDrag(allowHorizontal, allowVertical);
+
+            var cursorNow = NativeMethods.GetCursorPos(out var cp) ? $"({cp.X},{cp.Y})" : "?";
+
+            DiagDrag($"#{dragSeq} dispatched pos=({dragFromLeft:0},{dragFromTop:0}) " +
+                $"cursor={cursorNow} trace=[{string.Join(" ", _dragTrace)}]");
         };
 
         // 拖动别的窗口时 Windows 会临时把被拖窗口提到最前，我们的置顶可能被挤掉；
@@ -352,6 +415,9 @@ public partial class DockWindow : Window
     /// </summary>
     private IntPtr DockWndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
+        // 诊断：原生层到底收到过多少个鼠标移动消息（用来区分"系统没发"与"WPF 没转成事件"）
+        if (msg == 0x0200) _nativeMoves++;
+
         if (msg == NativeMethods.WM_MOUSEACTIVATE)
         {
             var foreground = NativeMethods.GetForegroundWindow();
@@ -361,6 +427,17 @@ public partial class DockWindow : Window
                 _foregroundBeforeActivate = foreground;
                 _foregroundBeforeActivateAt = Environment.TickCount64;
             }
+
+            // 这次点击**不要激活悬浮栏**（MA_NOACTIVATE：不激活、但鼠标消息照常投给我）。
+            //
+            // 系统把前台交给悬浮栏时会把鼠标消息压住：第一次点击若紧接着快速拖动，
+            // 按下事件能滞后几百像素（实测 655px），拖动看起来像残影、甚至完全不触发。
+            // 悬浮栏是任务栏式的工具条，本来就不需要前台：
+            //   · 左键的"切换/最小化"判定看的是 Z 序，不看自己是不是前台；
+            //   · 要切别的窗口时我们本来就用 ForceForeground 显式做。
+            // 所以不激活不影响任何功能，只是把那段阻塞省掉。
+            handled = true;
+            return new IntPtr(NativeMethods.MA_NOACTIVATE);
         }
 
         return IntPtr.Zero;
@@ -878,6 +955,20 @@ public partial class DockWindow : Window
     /// </summary>
     private void ClampToScreen()
     {
+        var (left, top) = ClampPoint(Left, Top);
+
+        if (Math.Abs(left - Left) > 0.1) Left = left;
+        if (Math.Abs(top - Top) > 0.1) Top = top;
+    }
+
+    /// <summary>
+    /// 把任意一个位置夹到屏幕允许范围内（ClampToScreen 的纯函数版）。
+    ///
+    /// 逐帧拖动时要用它：先把算出来的位置夹好再赋值，窗口就不会出现"被设到屏外、
+    /// 又被 ClampToScreen 拉回来"的每帧拉锯 —— 那正是贴着边缘继续拖时界面闪动的原因。
+    /// </summary>
+    private (double Left, double Top) ClampPoint(double left, double top)
+    {
         const double margin = 10;
 
         double vLeft = SystemParameters.VirtualScreenLeft;
@@ -893,11 +984,7 @@ public partial class DockWindow : Window
         if (maxLeft < minLeft) maxLeft = minLeft;
         if (maxTop < minTop) maxTop = minTop;
 
-        double left = Math.Clamp(Left, minLeft, maxLeft);
-        double top = Math.Clamp(Top, minTop, maxTop);
-
-        if (Math.Abs(left - Left) > 0.1) Left = left;
-        if (Math.Abs(top - Top) > 0.1) Top = top;
+        return (Math.Clamp(left, minLeft, maxLeft), Math.Clamp(top, minTop, maxTop));
     }
 
     protected override void OnRenderSizeChanged(SizeChangedInfo info)
@@ -957,13 +1044,16 @@ public partial class DockWindow : Window
 
     private void MoveToDefaultPosition()
     {
-        var area = SystemParameters.WorkArea;
+        // 一律按屏幕外沿算，不用 SystemParameters.WorkArea —— 那只代表任务栏让出来的区域，
+        // 任务栏在顶部/左侧时会凭空多出一段"避让距离"。
+        double vLeft = SystemParameters.VirtualScreenLeft;
+        double vTop = SystemParameters.VirtualScreenTop;
 
-        Left = area.Left + Math.Max(0, (area.Width - ActualWidth) / 2);
+        Left = vLeft + Math.Max(0, (SystemParameters.VirtualScreenWidth - ActualWidth) / 2);
 
         // 不贴屏幕最上沿：贴边自动隐藏的判定阈值是 12px，落到 6px 会一启动就被收纳起来。
         // 留 28px —— 还是在上边，但稳稳在阈值之外。
-        Top = area.Top + 28;
+        Top = vTop + 28;
 
         UpdateTooltipPlacement();
     }
@@ -982,7 +1072,11 @@ public partial class DockWindow : Window
     {
         if (!App.Settings.CenterOnScreen) return;
 
-        var area = SystemParameters.WorkArea;
+        // 同 MoveToDefaultPosition：按屏幕外沿算，不按任务栏让出来的工作区算。
+        double vLeft = SystemParameters.VirtualScreenLeft;
+        double vTop = SystemParameters.VirtualScreenTop;
+        double vWidth = SystemParameters.VirtualScreenWidth;
+        double vHeight = SystemParameters.VirtualScreenHeight;
 
         bool horizontalEdge = _edgeSide is DockEdge.Left or DockEdge.Right;
         bool verticalEdge = _edgeSide is DockEdge.Top or DockEdge.Bottom;
@@ -992,7 +1086,7 @@ public partial class DockWindow : Window
         {
             if (horizontalEdge) return;
 
-            double left = area.Left + Math.Max(0, (area.Width - ActualWidth) / 2);
+            double left = vLeft + Math.Max(0, (vWidth - ActualWidth) / 2);
 
             if (_edgeHidden)
             {
@@ -1007,7 +1101,7 @@ public partial class DockWindow : Window
         {
             if (verticalEdge) return;
 
-            double top = area.Top + Math.Max(0, (area.Height - ActualHeight) / 2);
+            double top = vTop + Math.Max(0, (vHeight - ActualHeight) / 2);
 
             if (_edgeHidden)
             {
@@ -1125,6 +1219,8 @@ public partial class DockWindow : Window
         // 拖动过程不拦（手感要自然），但"居中"是条一直成立的规则 ——
         // 不是只有改尺寸那一下才生效。
         if (App.Settings.CenterOnScreen) ApplyCentering();
+
+        DiagDrag($"finish pos=({Left:0},{Top:0}) hidden={_edgeHidden} side={_edgeSide}");
     }
 
     /// <summary>
@@ -1160,8 +1256,14 @@ public partial class DockWindow : Window
             double dx = (now.X - start.X) / dpi.DpiScaleX;
             double dy = (now.Y - start.Y) / dpi.DpiScaleY;
 
-            if (allowHorizontal) Left = startLeft + dx;
-            if (allowVertical) Top = startTop + dy;
+            // 先夹进屏幕再赋值。直接赋超界值的话，窗口先被移到屏外、紧接着 LocationChanged
+            // 里的 ClampToScreen 又把它拉回来 —— 每帧来回一次，就是"贴着边缘继续拖时界面闪动"。
+            var (nextLeft, nextTop) = ClampPoint(
+                allowHorizontal ? startLeft + dx : Left,
+                allowVertical ? startTop + dy : Top);
+
+            if (allowHorizontal && Math.Abs(nextLeft - Left) > 0.1) Left = nextLeft;
+            if (allowVertical && Math.Abs(nextTop - Top) > 0.1) Top = nextTop;
         }
 
         void OnUp(object? sender, MouseButtonEventArgs args)
@@ -1300,6 +1402,41 @@ public partial class DockWindow : Window
         }
     }
 
+    /// <summary>
+    /// 把"展开时应该在的位置"严格钉在屏幕外沿上：贴哪条边，那条边就等于屏幕边。
+    ///
+    /// 一律用整块虚拟桌面的外沿，**不理会任务栏让出来的工作区**（SystemParameters.WorkArea）。
+    /// 用它是为了纠正一个实测到的问题：启动恢复贴底收纳时，展开位置直接沿用上次保存的
+    /// DockTop —— 那是个按当时窗口高度算出来的数，高度一变（关掉几个窗口再启动），
+    /// 底边就落在任务栏上沿而不是屏幕底边。
+    /// </summary>
+    private void SnapDockToScreenEdge(DockEdge side, ref double left, ref double top)
+    {
+        double vLeft = SystemParameters.VirtualScreenLeft;
+        double vTop = SystemParameters.VirtualScreenTop;
+        double vRight = vLeft + SystemParameters.VirtualScreenWidth;
+        double vBottom = vTop + SystemParameters.VirtualScreenHeight;
+
+        switch (side)
+        {
+            case DockEdge.Left:
+                left = vLeft;
+                break;
+
+            case DockEdge.Right:
+                left = vRight - ActualWidth;
+                break;
+
+            case DockEdge.Top:
+                top = vTop;
+                break;
+
+            case DockEdge.Bottom:
+                top = vBottom - ActualHeight;
+                break;
+        }
+    }
+
     /// <summary>贴边判定成立后挪出去。</summary>
     private void HideToEdge(bool animated)
     {
@@ -1307,9 +1444,15 @@ public partial class DockWindow : Window
 
         if (!_edgeHidden)
         {
-            // 记住屏幕内的原位，呼出时要回到这儿
+            // 记住屏幕内的原位，呼出时要回到这儿。
+            //
+            // 这里要**再钉一次屏幕边**：拖动过程中 ClampToScreen 会强制留 10px 最低边距（防止拖出屏幕），
+            // 所以"用户拖到贴边"时记住的坐标离屏幕边还差那 10px；直接拿它当呼出位置，就会出现
+            // "拖动触发呼出差一点、重启恢复后完全贴边"两套位置。呼出位置统一按屏幕外沿算。
             _edgeDockLeft = Left;
             _edgeDockTop = Top;
+            SnapDockToScreenEdge(_edgeSide, ref _edgeDockLeft, ref _edgeDockTop);
+
             _edgeHidden = true;
 
             App.Settings.EdgeHiddenSide = _edgeSide;
@@ -1319,6 +1462,7 @@ public partial class DockWindow : Window
         _edgeLeaveAt = DateTime.MinValue;
 
         ComputeEdgeHiddenPosition(_edgeSide, out var left, out var top);
+        Diag($"edge-hide: side={_edgeSide} dock=({_edgeDockLeft:0},{_edgeDockTop:0}) -> ({left:0},{top:0})");
         AnimateEdgeTo(left, top, animated, hiding: true);
     }
 
@@ -1397,12 +1541,14 @@ public partial class DockWindow : Window
         if (side == DockEdge.None) return;
         if (ActualWidth <= 0 || ActualHeight <= 0) return;
 
-        // 屏幕内的原位就是上次保存的位置
+        // 屏幕内的原位：保存在设置里的坐标只当参考，贴边那条轴按屏幕外沿重新钉一遍
         _edgeDockLeft = App.Settings.DockLeft ?? Left;
         _edgeDockTop = App.Settings.DockTop ?? Top;
 
         _edgeSide = side;
         _edgeHidden = true;
+
+        SnapDockToScreenEdge(side, ref _edgeDockLeft, ref _edgeDockTop);
 
         ComputeEdgeHiddenPosition(side, out var left, out var top);
 
@@ -1603,6 +1749,38 @@ public partial class DockWindow : Window
     }
 
     private static int _diagCount;
+
+    private static int _dragSeq;
+
+    /// <summary>拖动过程中的窗口坐标轨迹（最多留 8 条），给 <see cref="DiagDrag"/> 用。</summary>
+    private void TraceDragPosition()
+    {
+        if (_dragTrace.Count >= 8) return;
+
+        _dragTrace.Add($"{Left:0},{Top:0}");
+    }
+
+    /// <summary>
+    /// 拖动诊断（%TEMP%\ExplorerDock.drag.log）—— 专为定位"启动后第一次拖动不跟手"：
+    /// 记下按下点、触发拖动时的鼠标点、前台抢没抢到、拖动前后窗口坐标。
+    /// </summary>
+    private static void DiagDrag(string message)
+    {
+        try
+        {
+            var path = Path.Combine(Path.GetTempPath(), "ExplorerDock.drag.log");
+
+            // 只用于排查拖动问题：超过 64KB 就从头来过，免得被大量鼠标记录撑成大文件
+            var info = new FileInfo(path);
+            if (info.Exists && info.Length > 64 * 1024) File.Delete(path);
+
+            File.AppendAllText(path, $"{DateTime.Now:HH:mm:ss.fff} {message}{Environment.NewLine}");
+        }
+        catch
+        {
+            // 日志失败无所谓
+        }
+    }
 
     private static void Diag(string message)
     {

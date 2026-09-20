@@ -98,6 +98,12 @@ internal static class NativeMethods
     /// <summary>激活请求：到达时系统还没把前台交出去，这是问"点击前谁在前台"的唯一时机。</summary>
     public const uint WM_MOUSEACTIVATE = 0x0021;
 
+    /// <summary>
+    /// WM_MOUSEACTIVATE 的返回值：别激活这个窗口，但消息照常投递给我。
+    /// 用它换掉"点击就激活"，省掉系统交前台时压住鼠标消息的那一段延迟。
+    /// </summary>
+    public const int MA_NOACTIVATE = 3;
+
     public const uint WM_GETICON = 0x007F;
     public const int ICON_SMALL = 0;
     public const int ICON_BIG = 1;
