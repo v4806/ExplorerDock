@@ -1341,10 +1341,35 @@ public partial class DockWindow : Window
 
         if (side == DockEdge.None)
         {
-            // 从贴边位置拖走了：解除收纳状态，窗口现在就在屏幕内，不用再挪
+            // 从贴边位置拖走了：解除收纳状态
             if (_edgeSide != DockEdge.None)
             {
                 StopEdgeAnimation();
+
+                // 状态被清空的这一刻要留痕：这一支以前只在"从贴边位置拖走了"时该走，
+                // 真出了"卡在屏外叫不出来"的毛病，日志里没有这一笔就只能靠猜。
+                Diag($"edge-clear: pos=({Left:0},{Top:0}) onScreen={IsOnScreen(Left, Top)} " +
+                     $"hidden={_edgeHidden} side={_edgeSide}");
+
+                // 收纳态下窗口本来就停在屏幕外（屏内只留 EdgePeekWidth 那一小段），
+                // 这时 DetectEdge 按当前位置判定必然得到 None —— 看着"不像贴边"。
+                // 若直接把状态清掉，窗口就被留在屏外：唤出探测（要求 _edgeSide != None）、
+                // 展开位置的记账（_edgeDock*）都不再认它，悬浮栏再也回不来。
+                // 所以清状态之前先确认窗口确实在屏幕内，不在就摆回来。
+                if (!IsOnScreen(Left, Top))
+                {
+                    double backLeft = _edgeHidden ? _edgeDockLeft : Left;
+                    double backTop = _edgeHidden ? _edgeDockTop : Top;
+                    var (clampedLeft, clampedTop) = ClampPoint(backLeft, backTop);
+
+                    _edgeSelfMove = true;
+                    Left = clampedLeft;
+                    Top = clampedTop;
+                    _edgeSelfMove = false;
+
+                    UpdateShadowBounds();
+                }
+
                 _edgeSide = DockEdge.None;
                 _edgeHidden = false;
                 _edgeLeaveAt = DateTime.MinValue;
@@ -1605,6 +1630,23 @@ public partial class DockWindow : Window
     private void OnEdgeProbeTick()
     {
         if (!EdgeHideEnabled || !IsVisible) return;
+
+        // 兜底：不在任何贴边状态，窗口却停在屏幕外 —— 状态和位置脱节了。
+        // 正常路径不该出现（位置变化时 UpdateEdgeState 会先摆回屏内再清状态），
+        // 这里再兜一层：宁可把悬浮栏摆回屏内，也不能让它卡在屏外叫不出来。
+        if (_edgeSide == DockEdge.None && !IsOnScreen(Left, Top))
+        {
+            var (backLeft, backTop) = ClampPoint(Left, Top);
+
+            _edgeSelfMove = true;
+            Left = backLeft;
+            Top = backTop;
+            _edgeSelfMove = false;
+
+            UpdateShadowBounds();
+            Diag($"probe-recover: offscreen -> ({backLeft:0},{backTop:0})");
+        }
+
         if (_edgeSide == DockEdge.None) return;
         if (_edgeAnimating || _dragging || _menuOpen) return;
 
@@ -1787,8 +1829,6 @@ public partial class DockWindow : Window
         }
     }
 
-    private static int _diagCount;
-
     private static int _dragSeq;
 
     /// <summary>拖动过程中的窗口坐标轨迹（最多留 8 条），给 <see cref="DiagDrag"/> 用。</summary>
@@ -1823,13 +1863,17 @@ public partial class DockWindow : Window
 
     private static void Diag(string message)
     {
-        // 只留少量定位日志，便于排查"悬浮栏跑到屏幕外"这类问题
-        if (Interlocked.Increment(ref _diagCount) > 40) return;
-
+        // 排查"悬浮栏跑到屏幕外"这类问题用。原先是"只记 40 条"，可状态机的关键一笔
+        // （比如贴边状态被清空）常常还没轮到就停写了；改成按体积封顶，够用又不失控。
         try
         {
+            var path = Path.Combine(Path.GetTempPath(), "ExplorerDock.dock.log");
+
+            var info = new FileInfo(path);
+            if (info.Exists && info.Length > 512 * 1024) return;
+
             File.AppendAllText(
-                Path.Combine(Path.GetTempPath(), "ExplorerDock.dock.log"),
+                path,
                 $"{DateTime.Now:HH:mm:ss.fff} {message}{Environment.NewLine}");
         }
         catch

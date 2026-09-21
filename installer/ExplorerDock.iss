@@ -5,7 +5,7 @@
 
 #define MyAppName "ExplorerDock"
 #define MyAppId "{{7C4E1B92-5F3D-4A88-9C21-6D0E5A7B4F31}"
-#define MyAppVersion "1.0.15"
+#define MyAppVersion "1.0.16"
 #define MyAppPublisher "v4806"
 #define MyAppURL "https://github.com/v4806/ExplorerDock"
 #define MyAppExeName "ExplorerDock.exe"
