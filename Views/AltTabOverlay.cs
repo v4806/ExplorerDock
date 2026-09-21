@@ -232,7 +232,11 @@ internal sealed class AltTabOverlay : Window
     public List<ThumbnailSlot> GetThumbnailSlots()
     {
         var slots = new List<ThumbnailSlot>();
-        if (_cards.Count == 0) return slots;
+        if (_cards.Count == 0)
+        {
+            _emptySlots = false;
+            return slots;
+        }
 
         var visible = VisibleBounds();
 
@@ -258,15 +262,12 @@ internal sealed class AltTabOverlay : Window
 
                     var rect = new Int32Rect((int)Math.Round(topLeft.X), (int)Math.Round(topLeft.Y), width, height);
 
-                    if (visible is { } area)
-                    {
-                        // 只保留落在可视区里的那一段：不然宿主窗口会被"只露出一角的格子"撑到面板之外，
-                        // 缩略图就贴着画到面板外面去了（跟上面 ClipToBounds 一起解决"没裁剪"）
-                        rect = Intersect(rect, area);
-                        if (rect.Width <= 2 || rect.Height <= 2) continue;
-                    }
+                    // 落在列表可视区里的那一块。注意这里**不能**把 rect 本身裁掉：
+                    // rect 决定缩略图按什么比例摆（裁过就会跟着被压扁变形），
+                    // 而超出列表的部分交给宿主窗口的裁剪区域去切 —— 见 ThumbnailSlot 的说明。
+                    var clip = visible is { } area ? Intersect(rect, area) : rect;
 
-                    slots.Add(new ThumbnailSlot(cell.Handle, rect));
+                    slots.Add(new ThumbnailSlot(cell.Handle, rect, clip));
                 }
                 catch
                 {
@@ -275,7 +276,35 @@ internal sealed class AltTabOverlay : Window
             }
         }
 
+        // 有卡片却一个格子都取不到：基本都是布局还没算完。
+        // 只记"空 ↔ 非空"的翻转，免得把日志刷爆。
+        if (slots.Count == 0) LogEmptySlots(visible);
+        else _emptySlots = false;
+
         return slots;
+    }
+
+    /// <summary>上一次取格子是不是空（用来给诊断去重）。</summary>
+    private bool _emptySlots;
+
+    private void LogEmptySlots(Int32Rect? visible)
+    {
+        if (_emptySlots) return;
+
+        _emptySlots = true;
+
+        var probe = "-";
+
+        if (_cards.Count > 0 && _cards[0].Cells.Count > 0)
+        {
+            var element = _cards[0].Cells[0].Element;
+            probe = $"{element.ActualWidth:0}x{element.ActualHeight:0}";
+        }
+
+        AltTabController.Log(
+            $"empty-slots: cards={_cards.Count} firstCell={probe} " +
+            $"scroll={_scroll.ActualWidth:0}x{_scroll.ActualHeight:0} offset={_scroll.VerticalOffset:0} " +
+            $"visible={(visible is { } v ? $"{v.X},{v.Y} {v.Width}x{v.Height}" : "null")}");
     }
 
     public void Dismiss()

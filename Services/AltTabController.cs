@@ -457,7 +457,7 @@ internal sealed class AltTabController : IDisposable
     /// DWM 的缩略图则是实时渲染的，最小化的窗口照样有真实画面。
     /// 注册一次就够，之后由 DWM 自己刷新。
     /// </summary>
-    private void StartThumbnails()
+    private void StartThumbnails(int retry = 1)
     {
         // 卡片位置要等布局算完，所以压到 Loaded 优先级再摆
         _app.Dispatcher.BeginInvoke(new Action(() =>
@@ -468,6 +468,8 @@ internal sealed class AltTabController : IDisposable
             {
                 _thumbnailHost = new AltTabThumbnailHost
                 {
+                    // 面板当归属窗口：缩略图层永远压在面板之上，点面板不会把它挤下去
+                    OwnerWindow = _overlay,
                     DragOverForward = e => _overlay?.ForwardDragOver(e),
                     DropForward = e => _overlay?.ForwardDrop(e),
                     WheelForward = e => _overlay?.ForwardMouseWheel(e),
@@ -479,6 +481,18 @@ internal sealed class AltTabController : IDisposable
             if (slots.Count == 0)
             {
                 _thumbnailHost.Hide();
+
+                // 布局还没算完时这里会是空的（面板刚弹出来那一刻）。
+                // 只 Hide 不重试的话这一整轮就再也没有缩略图了，所以稍后再摆一次。
+                if (retry > 0)
+                {
+                    lock (_scrollGate)
+                    {
+                        _scrollTimer?.Dispose();
+                        _scrollTimer = new Timer(_ => Post(() => StartThumbnails(retry - 1)), null, 120, Timeout.Infinite);
+                    }
+                }
+
                 return;
             }
 
@@ -495,17 +509,35 @@ internal sealed class AltTabController : IDisposable
 
     /// <summary>
     /// 面板滚动了。DWM 缩略图贴的是屏幕坐标，不会跟着 WPF 滚动走，
-    /// 所以先把它们收掉（免得错位），停手 80ms 之后再按新的位置重挂一遍。
+    /// 所以每一帧都按新的卡片位置就地更新一遍。
+    ///
+    /// 原来这里是"先把整层缩略图收掉、停手 80ms 再重挂"—— 那样只要光标还在滚，
+    /// 缩略图就一直收着、全部退化成程序图标（用户报的"滚动列表时预览全变成图标"）。
+    /// 现在滚动期间就地跟随，只有停手之后才全量重挂一次，把裁剪区域与格子的增减对齐。
     /// </summary>
     private void OnScrolled()
     {
-        StopThumbnails();
+        UpdateThumbnails();
 
         lock (_scrollGate)
         {
             _scrollTimer?.Dispose();
-            _scrollTimer = new Timer(_ => Post(StartThumbnails), null, 80, Timeout.Infinite);
+            _scrollTimer = new Timer(_ => Post(() => StartThumbnails()), null, 150, Timeout.Infinite);
         }
+    }
+
+    /// <summary>滚动中：按当前卡片位置就地挪缩略图，不注销重挂。</summary>
+    private void UpdateThumbnails()
+    {
+        if (!_active || _overlay is null || _thumbnailHost is null) return;
+
+        var slots = _overlay.GetThumbnailSlots();
+
+        // 取不到格子（布局/滚动的中间态）就保持现状，别收起来 ——
+        // 要收起来的是"面板关了"那件事，由 StopThumbnails 负责。
+        if (slots.Count == 0) return;
+
+        _thumbnailHost.Update(slots);
     }
 
     private void StopScrollTimer()
