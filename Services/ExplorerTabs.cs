@@ -1,5 +1,3 @@
-using System.Collections.Concurrent;
-using System.Threading;
 using System.Windows.Automation;
 using ExplorerDock.Interop;
 
@@ -34,9 +32,7 @@ internal static class ExplorerTabs
     private const int CallTimeoutMs = 1500;
 
     private static readonly object Gate = new();
-    private static readonly BlockingCollection<Action> Queue = new();
     private static readonly Dictionary<IntPtr, Entry> Cache = new();
-    private static Thread? _worker;
 
     private sealed class Entry
     {
@@ -70,6 +66,10 @@ internal static class ExplorerTabs
     {
         if (hwnd == IntPtr.Zero || !NativeMethods.IsWindow(hwnd)) return new List<ExplorerTabInfo>();
 
+        // 未响应的窗口根本不发 UIA 调用：UIA 对 hung 窗口能卡十几秒，白白占掉一条通道。
+        // 返回空列表后，下面的缓存逻辑会保住上一次认出来的标签页（最小化走的也是这条兜底）。
+        if (NativeMethods.IsHungAppWindow(hwnd)) return new List<ExplorerTabInfo>();
+
         bool minimized = NativeMethods.IsIconic(hwnd);
 
         lock (Gate)
@@ -82,7 +82,7 @@ internal static class ExplorerTabs
             }
         }
 
-        var tabs = Run(() => ReadCore(hwnd), new List<ExplorerTabInfo>());
+        var tabs = Run(Channel("read", hwnd), () => ReadCore(hwnd), new List<ExplorerTabInfo>(), "uia: read tabs");
 
         lock (Gate)
         {
@@ -119,10 +119,13 @@ internal static class ExplorerTabs
     {
         if (hwnd == IntPtr.Zero || index < 0 || !NativeMethods.IsWindow(hwnd)) return false;
 
+        // 未响应的窗口发了也白发（还会占住一条通道十几秒）
+        if (NativeMethods.IsHungAppWindow(hwnd)) return false;
+
         // 已经在目标标签上：什么都不用做（省掉一次没意义的 UI Automation 调用）
         if (SelectedIndex(hwnd) == index) return true;
 
-        if (!Run(() => ActivateCore(hwnd, index), false)) return false;
+        if (!Run(Channel("activate", hwnd), () => ActivateCore(hwnd, index), false, "uia: activate tab")) return false;
 
         return UpdateSelectedCache(hwnd, index);
     }
@@ -174,7 +177,12 @@ internal static class ExplorerTabs
     /// 让窗口执行它自己的粘贴命令就绕开了焦点：命令是窗口自己跑的，谁触发它不在乎。
     /// </summary>
     public static bool InvokePasteCommand(IntPtr hwnd)
-        => Run(() => InvokePasteCore(hwnd), false);
+    {
+        // 未响应的窗口：粘贴命令发了也落不到实处，先挡掉（顺便不占通道）
+        if (hwnd == IntPtr.Zero || NativeMethods.IsHungAppWindow(hwnd)) return false;
+
+        return Run(Channel("paste", hwnd), () => InvokePasteCore(hwnd), false, "uia: paste");
+    }
 
     private static bool InvokePasteCore(IntPtr hwnd)
     {
@@ -270,74 +278,24 @@ internal static class ExplorerTabs
         }
     }
 
-    // ---------- UIA 专用线程 ----------
+    // ---------- UIA 调用隔离 ----------
 
-    private static T Run<T>(Func<T> work, T fallback)
+    /// <summary>
+    /// 所有 UIA 调用都从这儿走：独立线程 + 硬超时，通道按"用途 + 窗口"分开。
+    ///
+    /// 旧实现是**一个**专用 worker 线程 + 队列：调用方超时就不等了，可 worker 仍卡在那个
+    /// UIA 调用里（对未响应的窗口能卡十几秒），于是后面所有 UIA 请求全部排队、一个个等超时 ——
+    /// 表现就是"一个未响应窗口让标签页、粘贴、拖放全哑掉"，严重时看起来就是悬浮栏卡死。
+    /// 现在每个窗口各自一条通道：卡住的那条被跳过，其他窗口照常工作。
+    /// </summary>
+    private static T Run<T>(string channel, Func<T> work, T fallback, string tag)
     {
-        try
-        {
-            EnsureWorker();
-
-            T result = fallback;
-            using var done = new ManualResetEventSlim(false);
-
-            Queue.Add(() =>
-            {
-                try
-                {
-                    result = work();
-                }
-                catch
-                {
-                    // UIA 出错就当读不到
-                }
-                finally
-                {
-                    done.Set();
-                }
-            });
-
-            return done.Wait(CallTimeoutMs) ? result : fallback;
-        }
-        catch
-        {
-            return fallback;
-        }
+        // UIA 客户端在 STA 线程上最稳（原来那个 worker 就是 STA），隔离线程沿用同一策略
+        return BoundedCall.Run(channel, CallTimeoutMs, work, fallback, tag, sta: true);
     }
 
-    private static void EnsureWorker()
-    {
-        if (_worker is not null) return;
-
-        lock (Gate)
-        {
-            if (_worker is not null) return;
-
-            var thread = new Thread(() =>
-            {
-                foreach (var action in Queue.GetConsumingEnumerable())
-                {
-                    try
-                    {
-                        action();
-                    }
-                    catch
-                    {
-                        // 单个任务失败不影响后面的
-                    }
-                }
-            })
-            {
-                IsBackground = true,
-                Name = "ExplorerDock.UIA",
-            };
-
-            thread.SetApartmentState(ApartmentState.STA);
-            thread.Start();
-
-            _worker = thread;
-        }
-    }
+    /// <summary>通道名：按用途 + 窗口句柄分，保证一个窗口卡住不牵连别的窗口。</summary>
+    private static string Channel(string kind, IntPtr hwnd) => $"uia:{kind}:0x{hwnd.ToInt64():X}";
 
     private static List<ExplorerTabInfo> ReadCore(IntPtr hwnd)
     {

@@ -50,11 +50,26 @@ internal static class AppUserModelId
     private const ushort VtLpwstr = 31;
     private const ushort VtEmpty = 0;
 
-    /// <summary>把窗口的 AppUserModelID 设为指定值；传 null 表示清掉（恢复系统默认分组）。</summary>
+    /// <summary>
+    /// 把窗口的 AppUserModelID 设为指定值；传 null 表示清掉（恢复系统默认分组）。
+    ///
+    /// 注意：属性存储的真正持有者是**窗口所属进程**，`SetValue`/`Commit` 是同步过去的 ——
+    /// 未响应的窗口就能把调用线程卡住。所以整个设置动作包进隔离调用（通道按窗口分）：
+    /// 卡住也只影响这一个窗口的这一次设置，下一轮接管轮询会自己再试。
+    /// </summary>
     public static bool TrySet(IntPtr hwnd, string? appId)
     {
         if (hwnd == IntPtr.Zero) return false;
 
+        return ExplorerDock.Services.BoundedCall.Run(
+            $"aumid:0x{hwnd.ToInt64():X}", SetTimeoutMs, () => TrySetCore(hwnd, appId), false, "aumid: set");
+    }
+
+    /// <summary>单次属性写入的等待上限。</summary>
+    private const int SetTimeoutMs = 400;
+
+    private static bool TrySetCore(IntPtr hwnd, string? appId)
+    {
         try
         {
             var iid = IIDIPropertyStore;

@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
 using System.Threading;
@@ -54,12 +55,13 @@ internal sealed class HostRuntime : IDisposable
         _host.Start();
 
         // 计划任务（「以管理员身份运行」时的自启用它）**只有管理员权限才建得出来**，
-        // 界面进程永远是普通权限，所以由我们（提权进程）在这儿校验并补齐。
-        // 任务已经正确时这个调用只跑一次 schtasks /Query，开销可以忽略。
-        if (App.Settings.RunAtStartup && App.Settings.RunElevated)
-        {
-            StartupRegistration.EnsureElevatedTask(Environment.ProcessPath);
-        }
+        // 界面进程永远是普通权限，所以由我们（提权进程）在这儿建/纠偏：
+        //   ① 补建任务；
+        //   ② 把旧版本用 schtasks 命令行建出来的任务改成正确的设置（电池可启动、无 72 小时时限）；
+        //   ③ 任务确认合规后，顺手清掉界面进程留下的兜底 Run 键。
+        // 任务已经正确时只跑一次 schtasks /Query，开销可以忽略。
+        StartupRegistration.Apply(App.Settings.RunAtStartup, App.Settings.RunElevated, Environment.ProcessPath);
+        StartupRegistration.LogSnapshot("host");
 
         AltTabController.Log($"host: keyboard installed={_host.KeyboardInstalled}");
 
@@ -105,8 +107,40 @@ internal sealed class HostRuntime : IDisposable
         _host.Dispose();
     }
 
-    /// <summary>界面进程断开多久还没回来，就认定它已经走了（兜底用，正常路径断开即退）。</summary>
-    private const double HostIdleExitSeconds = 2;
+    /// <summary>
+    /// 界面断开多久之后，才去检查"界面进程是不是真的没了"。给足余量：
+    /// 界面那边一次操作超时（未响应窗口）就会短暂断开，但那不代表它走了。
+    /// </summary>
+    private const double HostIdleExitSeconds = 10;
+
+    /// <summary>
+    /// 除了自己，还有没有别的 ExplorerDock 进程（也就是界面进程）在跑。
+    ///
+    /// 看门狗用它做最终判据：界面进程还在就继续等它重连，**不要因为管道断开就自杀** ——
+    /// 以前只看"断开 2 秒"，界面那边点一下未响应窗口就足够把宿主带走，
+    /// 之后界面所有操作都失败，用户看到的就是"整个软件卡死"。
+    /// </summary>
+    private static bool UiProcessAlive()
+    {
+        try
+        {
+            int self = Environment.ProcessId;
+
+            foreach (var process in Process.GetProcessesByName("ExplorerDock"))
+            {
+                using (process)
+                {
+                    if (process.Id != self) return true;
+                }
+            }
+        }
+        catch
+        {
+            // 查不到就当界面不在了：宁可退出，也不要留一个摘了按钮却没人管的僵尸进程
+        }
+
+        return false;
+    }
 
     /// <summary>界面进程当前是不是连着。</summary>
     private volatile bool _uiConnected;
@@ -136,6 +170,9 @@ internal sealed class HostRuntime : IDisposable
                 if (since == DateTime.MinValue) continue;
                 if ((DateTime.UtcNow - since).TotalSeconds < HostIdleExitSeconds) continue;
 
+                // 关键判据是"界面进程还在不在"，不是"断开了多久"：界面还活着就继续等它重连
+                if (UiProcessAlive()) continue;
+
                 AltTabController.Log("host: ui gone, restoring taskbar buttons and exiting");
 
                 try
@@ -147,7 +184,7 @@ internal sealed class HostRuntime : IDisposable
                     // 忽略
                 }
 
-                Environment.Exit(0);
+                LeaveNow();
             }
         })
         {
@@ -192,6 +229,13 @@ internal sealed class HostRuntime : IDisposable
     }
 
     /// <summary>把窗口操作放到 GUI 线程上执行并等结果（已经在该线程上时直接执行，避免自等死锁）。</summary>
+    /// <summary>GUI 线程忙过这个时长，就不再往队列里塞新命令（塞进去只会让每个调用方各等 8 秒）。</summary>
+    private const int GuiBusySkipMs = 1200;
+
+    /// <summary>GUI 线程当前有没有在执行命令；有的话从什么时候开始。</summary>
+    private int _guiBusy;
+    private long _guiBusySince;
+
     private T RunOnGui<T>(Func<T> work, T fallback)
     {
         if (_guiThread is not null && Thread.CurrentThread == _guiThread)
@@ -208,6 +252,17 @@ internal sealed class HostRuntime : IDisposable
 
         EnsureGuiThread();
 
+        // GUI 线程正被某个卡住的操作占着（超过阈值）：**不要再排队**。
+        // 排队让每个请求各等 8 秒，用户感觉"整个软件卡死"—— 实测一个未响应窗口
+        // 让 4 次点击各等 8 秒，直到它恢复才一起完成。对手已经卡住的窗口，排队也没有意义：
+        // 直接快速失败，等它恢复后下一次点击自然正常。
+        if (Volatile.Read(ref _guiBusy) != 0 &&
+            Environment.TickCount64 - Volatile.Read(ref _guiBusySince) > GuiBusySkipMs)
+        {
+            AltTabController.Log($"host: gui 忙超过 {GuiBusySkipMs}ms，跳过请求（多半是未响应窗口占着）");
+            return fallback;
+        }
+
         T result = fallback;
         using var done = new ManualResetEventSlim(false);
 
@@ -215,6 +270,9 @@ internal sealed class HostRuntime : IDisposable
         {
             _guiQueue.Add(() =>
             {
+                Volatile.Write(ref _guiBusySince, Environment.TickCount64);
+                Volatile.Write(ref _guiBusy, 1);
+
                 try
                 {
                     result = work();
@@ -225,6 +283,7 @@ internal sealed class HostRuntime : IDisposable
                 }
                 finally
                 {
+                    Volatile.Write(ref _guiBusy, 0);
                     done.Set();
                 }
             });
@@ -234,7 +293,11 @@ internal sealed class HostRuntime : IDisposable
             return fallback;
         }
 
-        return done.Wait(8000) ? result : fallback;
+        if (done.Wait(8000)) return result;
+
+        // 卡住的操作用户看不见，日志里必须留一笔（最常见的原因是目标窗口未响应）
+        AltTabController.Log("host: gui 调用超时 8000ms（队列可能被未响应窗口的操作占着）");
+        return fallback;
     }
 
     private async Task AcceptAndServeAsync()
@@ -264,17 +327,23 @@ internal sealed class HostRuntime : IDisposable
             if (message is null) continue;
 
             // 窗口操作统一丢到 GUI 线程上做（见 _guiQueue 的注释）：
-            // 线程池线程没有消息队列，SetFocus 那种操作在那里是不可靠的
-            if (!RunOnGui(() => Handle(message), false)) break;
+            // 线程池线程没有消息队列，SetFocus 那种操作在那里是不可靠的。
+            //
+            // fallback 必须是 true：RunOnGui 在"GUI 线程 8 秒还没做完"时返回 fallback，
+            // 而 false 在这个循环里等于"界面要求收摊"。两者一混，就变成
+            // "只要有一个未响应窗口让某次操作卡住 → 宿主自杀 → 界面从此全部功能失效"。
+            // 超时 ≠ 收摊：只有 Handle 明确返回 false（收到退出命令）才结束。
+            if (!RunOnGui(() => Handle(message), true)) break;
         }
 
         _uiConnected = false;
         _uiDisconnectedAt = DateTime.UtcNow;
         AltTabController.Log("host: ui disconnected");
 
-        // 界面连上过又断开 = 界面已经走了：立刻把任务栏按钮还回去并结束自己，不做任何等待。
-        // 界面要是重新启动，会拉起新的功能进程。
-        LeaveNow();
+        // 断开 ≠ "界面走了"：可能是界面自己重启，也可能只是一次抖动。
+        // 这里**不要结束进程** —— 回到主循环重新等连接；"界面真的没了"由看门狗按
+        // "进程是否还在"来判定。（以前这里直接 LeaveNow()，配合上面那处超时误判，
+        // 就成了"一次卡顿 = 宿主自杀、界面从此全废"。）
     }
 
     /// <summary>
@@ -332,6 +401,16 @@ internal sealed class HostRuntime : IDisposable
                     break;
 
                 case HostProtocol.CmdActivate:
+                    // 未响应的窗口：激活注定失败（SetForegroundWindow / AttachThreadInput 会一直等它），
+                    // 而且会把**串行**的 GUI 队列占住十几秒 —— 后面所有点击都在排队，
+                    // 用户感觉就是"点哪儿都没反应"。直接快速失败，别占队列。
+                    if (NativeMethods.IsHungAppWindow(new IntPtr(message.Hwnd)))
+                    {
+                        message.Ok = false;
+                        AltTabController.Log($"host: activate 跳过（窗口未响应）0x{message.Hwnd:X}");
+                        break;
+                    }
+
                     message.Ok = _host.Activate(new IntPtr(message.Hwnd), message.Tab);
                     AltTabController.Log(
                         $"host: activate 0x{message.Hwnd:X} tab={message.Tab} ok={message.Ok} " +

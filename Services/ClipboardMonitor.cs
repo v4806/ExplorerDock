@@ -190,14 +190,14 @@ internal sealed class ClipboardMonitor : IDisposable
         }
     }
 
-    /// <summary>诊断日志：%TEMP%\ExplorerDock.clipboard.log，超过 200KB 就不再写。</summary>
+    /// <summary>诊断日志：%TEMP%\ExplorerDock.clipboard.log，超过 200KB 就重开一份（不会停写）。</summary>
     internal static void Log(string message)
     {
         try
         {
             var path = Path.Combine(Path.GetTempPath(), "ExplorerDock.clipboard.log");
             var info = new FileInfo(path);
-            if (info.Exists && info.Length > 200_000) return;
+            if (info.Exists && info.Length > 200_000) File.Delete(path);
 
             File.AppendAllText(path, $"{DateTime.Now:HH:mm:ss.fff} {message}{Environment.NewLine}");
         }

@@ -332,7 +332,15 @@ internal sealed class RemoteWindowHost : IWindowHost
         return result;
     }
 
-    private bool Request(HostMessage message, int timeoutMs = 5000)
+    /// <summary>
+    /// 默认等待上限：1.5 秒。
+    ///
+    /// 这个等待是**在界面线程上同步做的** —— 给太长就等于"点一下冻住界面这么久"。
+    /// 宿主那边现在对卡住的操作会快速失败（见 HostRuntime 的 GUI 忙跳过），
+    /// 正常操作都是毫秒级，1.5 秒足够；真卡住时宁快速失败，也别把悬浮栏冻住。
+    /// 需要更长等待的操作（关窗口、结束进程、粘贴）都在各自方法里显式指定。
+    /// </summary>
+    private bool Request(HostMessage message, int timeoutMs = 1500)
     {
         var stream = _stream;
         if (stream is null || !_connected) return false;

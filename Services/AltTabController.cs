@@ -62,7 +62,8 @@ internal sealed class AltTabController : IDisposable
 
     /// <summary>
     /// 诊断日志：写到 %TEMP%\ExplorerDock.alttab.log（功能进程写 ExplorerDock.host.log）。
-    /// 超过 200KB 就不再写。
+    /// 超过 200KB 就删掉重开一份 —— **不能"满了就停写"**：那样事后排查
+    /// "宿主为什么退出 / 为什么点了没反应"的时候，恰好一行日志都看不到（已经踩过这个坑）。
     ///
     /// 两个进程各写各的文件：同一个文件被两个进程同时追加会互相抢，日志会丢行。
     /// </summary>
@@ -73,8 +74,9 @@ internal sealed class AltTabController : IDisposable
             lock (LogGate)
             {
                 var path = Path.Combine(Path.GetTempPath(), LogFileName);
+
                 var info = new FileInfo(path);
-                if (info.Exists && info.Length > 200_000) return;
+                if (info.Exists && info.Length > 200_000) File.Delete(path);
 
                 File.AppendAllText(path, $"{DateTime.Now:HH:mm:ss.fff} {message}{Environment.NewLine}");
             }

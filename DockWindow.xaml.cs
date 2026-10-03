@@ -119,6 +119,19 @@ public partial class DockWindow : Window
     /// <summary>光标离开悬浮栏的时刻，用来算"过一会儿自动收回"。</summary>
     private DateTime _edgeLeaveAt = DateTime.MinValue;
 
+    /// <summary>
+    /// 尺寸变化**之前**的窗口矩形（逻辑坐标），只在贴边自动隐藏里当"容忍区"用。
+    ///
+    /// 为什么需要：中键/右键关掉一个按钮后悬浮栏会变窄（贴右边/下边时 ReanchorEdgeDock 还会整体挪位），
+    /// 于是光标"落到收缩后的窗口之外"了 —— 只按当前矩形判定的话，用户明明没动鼠标也会被当成
+    /// "已经离开"而立刻收回。保留变化前的矩形：光标还在旧矩形里就不算离开，
+    /// 真移出新旧矩形的并集才恢复正常的离去计时。
+    /// </summary>
+    private (double Left, double Top, double Width, double Height)? _edgeStaleRect;
+
+    /// <summary>最近一次尺寸变化的时刻：刚变化完的那一小段时间里先别判定"鼠标离开"。</summary>
+    private DateTime _edgeLayoutChangedAt = DateTime.MinValue;
+
     /// <summary>滑出之后光标离开多久自动收回（可在「贴边隐藏设置」里调）。</summary>
     private static double EdgeRetractMs => Math.Clamp(App.Settings.EdgeRetractDelayMs, 0, 10000);
     private IntPtr _lastActiveFolder;
@@ -255,9 +268,15 @@ public partial class DockWindow : Window
             }
             UpdateShadowBounds();
 
-            // 贴边即判定：位置一变就重新判断靠没靠边（拖动中会被内部跳过，
-            // 因为 DragMove() 自己也在改坐标，这时插动画会互相打架）
-            UpdateEdgeState();
+            // 贴边判定只在"用户正在拖"时才由位置变化驱动。
+            //
+            // 为什么不能无条件判：程序自己也会改位置 —— ReanchorEdgeDock 保持贴边、居中、
+            // 收纳动画都会；而 LocationChanged 是**异步**到达的（走 WM_MOVE 消息），
+            // 设置 Left 时那圈 _edgeSelfMove 保护早就失效了。于是
+            // "中键关掉一个窗口 → 尺寸变了 → 自己左移一下保持贴边"会被当成
+            // "用户把窗口拖到了屏幕边上"，直接收纳 —— 而光标明明还在栏上。
+            // （拖动结束时的判定由 FinishDrag 显式调用，不受这里影响。）
+            if (_dragging) UpdateEdgeState();
         };
 
         // 整条悬浮栏任意位置按住都能拖：先记下按下的位置，
@@ -1000,6 +1019,17 @@ public partial class DockWindow : Window
 
     protected override void OnRenderSizeChanged(SizeChangedInfo info)
     {
+        // 记下"变化前"的矩形当容忍区：此刻位置和尺寸都还是旧值（ReanchorEdgeDock 在 base 之后才动位置）。
+        // 首次布局时 PreviousSize 是 0，跳过 —— 否则会留下一个无意义的容忍区。
+        // 而且要**累积成并集**：关掉一个按钮常常引起连续几次尺寸变化，只留"上一次"的话，
+        // 光标会落在更早那一版矩形里，照样被误判成"已经离开"而立刻收回。
+        if (info.PreviousSize.Width > 1 && info.PreviousSize.Height > 1)
+        {
+            NoteStaleRect(Left, Top, info.PreviousSize.Width, info.PreviousSize.Height);
+        }
+
+        _edgeLayoutChangedAt = DateTime.UtcNow;
+
         base.OnRenderSizeChanged(info);
 
         // 贴边位置的锚定用 info 里的新旧尺寸就能算，不用等布局走完
@@ -1033,7 +1063,16 @@ public partial class DockWindow : Window
 
         // ③ 收纳中：按新尺寸重算屏外位置（屏内留多少像素要跟着变），
         //    这一步放在 ② 之后 —— ② 会把居中的那条轴记进展开位置，重算时正好用上。
-        if (!_edgeHidden || _edgeSide == DockEdge.None) return;
+        if (!_edgeHidden || _edgeSide == DockEdge.None)
+        {
+            // 展开状态：贴右边/下边时把窗口摆回"锚点边不动"的位置。
+            //
+            // 必须放在这里（布局与窗口位置同步都走完之后），而不是在 OnRenderSizeChanged 里
+            // 同步改 Left —— 那样会被 WPF 随后的窗口位置同步覆盖掉：宽度一变（比如某个窗口从
+            // 长标题变成「（未响应）」），右边缘就从屏幕边缩回来、与屏幕边之间留出一条缝。
+            ApplyEdgeDockPosition();
+            return;
+        }
 
         ComputeEdgeHiddenPosition(_edgeSide, out var hiddenLeft, out var hiddenTop);
 
@@ -1043,6 +1082,32 @@ public partial class DockWindow : Window
         _edgeSelfMove = false;
 
         UpdateShadowBounds();
+    }
+
+    /// <summary>
+    /// 把展开状态的窗口摆回"锚点边不动"的位置（贴右边/下边时，贴住的那条边固定不动）。
+    ///
+    /// 与 <see cref="ReanchorEdgeDock"/> 的分工：那边只按新旧尺寸修订记账位置（_edgeDock*），
+    /// 并做一次尽力而为的同步移动；**真正的落位在这里** —— 布局与窗口位置同步走完之后再设，
+    /// 才不会被 WPF 覆盖。位置已经正确时什么都不做。
+    /// </summary>
+    private void ApplyEdgeDockPosition()
+    {
+        if (_edgeSide is not (DockEdge.Bottom or DockEdge.Right)) return;
+        if (_edgeAnimating || _dragging) return;
+
+        if (Math.Abs(Left - _edgeDockLeft) < 0.5 && Math.Abs(Top - _edgeDockTop) < 0.5) return;
+
+        double beforeLeft = Left;
+        double beforeTop = Top;
+
+        _edgeSelfMove = true;
+        Left = _edgeDockLeft;
+        Top = _edgeDockTop;
+        _edgeSelfMove = false;
+
+        UpdateShadowBounds();
+        Diag($"dock-apply: ({beforeLeft:0},{beforeTop:0}) -> ({_edgeDockLeft:0},{_edgeDockTop:0})");
     }
 
     private static bool IsOnScreen(double left, double top)
@@ -1189,6 +1254,12 @@ public partial class DockWindow : Window
     {
         if (_edgeSide is not (DockEdge.Bottom or DockEdge.Right)) return;
         if (info.PreviousSize.Width <= 1 || info.PreviousSize.Height <= 1) return;
+
+        // "贴右边/下边时锚点边不动"就是靠这一支实现的。万一观感上仍是"往右长"，
+        // 这一笔能直接说明是这里没生效，还是内容对齐/别处把位置改回去了。
+        Diag($"reanchor: side={_edgeSide} size={info.PreviousSize.Width:0}x{info.PreviousSize.Height:0}" +
+             $"->{info.NewSize.Width:0}x{info.NewSize.Height:0} dock=({_edgeDockLeft:0},{_edgeDockTop:0}) " +
+             $"left={Left:0} hidden={_edgeHidden}");
 
         if (_edgeSide == DockEdge.Bottom)
         {
@@ -1373,6 +1444,7 @@ public partial class DockWindow : Window
                 _edgeSide = DockEdge.None;
                 _edgeHidden = false;
                 _edgeLeaveAt = DateTime.MinValue;
+                ApplyEdgeAlignment();
 
                 if (App.Settings.EdgeHiddenSide != DockEdge.None)
                 {
@@ -1386,6 +1458,7 @@ public partial class DockWindow : Window
 
         _edgeSide = side;
         _edgeLeaveAt = DateTime.MinValue;
+        ApplyEdgeAlignment();
 
         if (_edgeHidden) return;
 
@@ -1559,6 +1632,8 @@ public partial class DockWindow : Window
         _edgeHidden = false;
         _edgeSide = DockEdge.None;
         _edgeLeaveAt = DateTime.MinValue;
+        _edgeStaleRect = null;
+        ApplyEdgeAlignment();
 
         if (App.Settings.EdgeHiddenSide != DockEdge.None)
         {
@@ -1611,6 +1686,7 @@ public partial class DockWindow : Window
 
         _edgeSide = side;
         _edgeHidden = true;
+        ApplyEdgeAlignment();
 
         SnapDockToScreenEdge(side, ref _edgeDockLeft, ref _edgeDockTop);
 
@@ -1647,6 +1723,30 @@ public partial class DockWindow : Window
             Diag($"probe-recover: offscreen -> ({backLeft:0},{backTop:0})");
         }
 
+        // 兜底：展开状态下窗口位置与记账位置脱节就摆回去。尺寸变化那一下的位置应用可能被
+        // WPF 覆盖（见 ApplyEdgeDockPosition），这里保证最迟一两百毫秒内自愈 ——
+        // 否则右边缘会一直离开屏幕边、与屏幕边之间留着一条缝。
+        if (_edgeSide != DockEdge.None && !_edgeHidden && !_edgeAnimating && !_dragging &&
+            !_menuOpen && !App.Settings.CenterOnScreen)
+        {
+            double driftX = Math.Abs(Left - _edgeDockLeft);
+            double driftY = Math.Abs(Top - _edgeDockTop);
+
+            if (driftX > 1.5 || driftY > 1.5)
+            {
+                double beforeLeft = Left;
+                double beforeTop = Top;
+
+                _edgeSelfMove = true;
+                Left = _edgeDockLeft;
+                Top = _edgeDockTop;
+                _edgeSelfMove = false;
+
+                UpdateShadowBounds();
+                Diag($"probe-realign: ({beforeLeft:0},{beforeTop:0}) -> ({_edgeDockLeft:0},{_edgeDockTop:0})");
+            }
+        }
+
         if (_edgeSide == DockEdge.None) return;
         if (_edgeAnimating || _dragging || _menuOpen) return;
 
@@ -1658,9 +1758,35 @@ public partial class DockWindow : Window
             return;
         }
 
-        // 光标还在悬浮栏上、或者还贴在触发带里（鼠标就放在屏幕边上没动）：
-        // 都算"还在用"，别急着收回 —— 否则贴着边缘不动会一直滑出又收回
-        if (CursorInsideDock(cursor, 4) || CursorInEdgeBand(cursor))
+        // 光标还在悬浮栏上：算"还在用"，顺手把容忍区撤掉。
+        if (CursorInsideDock(cursor, 4))
+        {
+            _edgeStaleRect = null;
+            _edgeLeaveAt = DateTime.MinValue;
+            return;
+        }
+
+        // 光标落在"尺寸变化前的旧矩形"里（但不在新矩形里）：是悬浮栏自己变窄或挪位了，不是用户离开 ——
+        // 典型场景就是中键关掉一个窗口按钮。继续算"还在用"，不收回。
+        if (_edgeStaleRect is { } stale && CursorInsideRect(cursor, stale, 4))
+        {
+            _edgeLeaveAt = DateTime.MinValue;
+            return;
+        }
+
+        // 到这儿说明新旧矩形都不在光标底下：容忍区作废
+        _edgeStaleRect = null;
+
+        // 刚发生过尺寸变化：这一小段时间里布局与坐标还在动，别急着判"用户离开"
+        if ((DateTime.UtcNow - _edgeLayoutChangedAt).TotalMilliseconds < EdgeLayoutGraceMs)
+        {
+            _edgeLeaveAt = DateTime.MinValue;
+            return;
+        }
+
+        // 鼠标还贴在触发带里（就放在屏幕边上没动）：也算"还在用"，
+        // 否则贴着边缘不动会一直滑出又收回
+        if (CursorInEdgeBand(cursor))
         {
             _edgeLeaveAt = DateTime.MinValue;
             return;
@@ -1675,6 +1801,13 @@ public partial class DockWindow : Window
 
         if ((DateTime.UtcNow - _edgeLeaveAt).TotalMilliseconds >= EdgeRetractMs)
         {
+            // 收回瞬间把三样东西记下来（光标、窗口矩形、容忍区）：万一"鼠标没动却收走"还会出现，
+            // 这一行就能说明是判定漏了哪块区域，不用再靠猜。
+            Diag($"edge-retract: cursor=({cursor.X:0},{cursor.Y:0}) " +
+                 $"dock=({Left:0},{Top:0},{ActualWidth:0}x{ActualHeight:0}) " +
+                 $"stale={(_edgeStaleRect is { } staleRect ? $"({staleRect.Left:0},{staleRect.Top:0},{staleRect.Width:0}x{staleRect.Height:0})" : "无")} " +
+                 $"sinceSize={((DateTime.UtcNow - _edgeLayoutChangedAt).TotalMilliseconds):0}ms");
+
             HideToEdge(animated: true);
         }
     }
@@ -1725,12 +1858,44 @@ public partial class DockWindow : Window
         };
     }
 
-    private bool CursorInsideDock(Point cursor, double tolerance)
+    /// <summary>尺寸变化后的宽限期：这段时间里不判定"鼠标离开"（变化是悬浮栏自己引起的）。</summary>
+    private const double EdgeLayoutGraceMs = 400;
+
+    /// <summary>
+    /// 把"变化前的矩形"并入容忍区（取并集）。
+    ///
+    /// 为什么要并集：关掉一个按钮会让窗口连续变化几次（按钮先消失、再重排、再收缩），
+    /// 每次 OnRenderSizeChanged 只保留"上一次"的矩形时，光标很容易落在更早那一版里 ——
+    /// 容忍区就形同虚设，中键关掉窗口后悬浮栏照样立刻收回。
+    /// </summary>
+    private void NoteStaleRect(double left, double top, double width, double height)
     {
-        return cursor.X >= Left - tolerance
-            && cursor.X <= Left + ActualWidth + tolerance
-            && cursor.Y >= Top - tolerance
-            && cursor.Y <= Top + ActualHeight + tolerance;
+        if (width <= 1 || height <= 1) return;
+
+        if (_edgeStaleRect is not { } old)
+        {
+            _edgeStaleRect = (left, top, width, height);
+            return;
+        }
+
+        double unionLeft = Math.Min(old.Left, left);
+        double unionTop = Math.Min(old.Top, top);
+        double unionRight = Math.Max(old.Left + old.Width, left + width);
+        double unionBottom = Math.Max(old.Top + old.Height, top + height);
+
+        _edgeStaleRect = (unionLeft, unionTop, unionRight - unionLeft, unionBottom - unionTop);
+    }
+
+    private bool CursorInsideDock(Point cursor, double tolerance)
+        => CursorInsideRect(cursor, (Left, Top, ActualWidth, ActualHeight), tolerance);
+
+    /// <summary>光标是否落在某个矩形里（带容差）。容忍区判定与当前矩形判定共用这一份。</summary>
+    private static bool CursorInsideRect(Point cursor, (double Left, double Top, double Width, double Height) rect, double tolerance)
+    {
+        return cursor.X >= rect.Left - tolerance
+            && cursor.X <= rect.Left + rect.Width + tolerance
+            && cursor.Y >= rect.Top - tolerance
+            && cursor.Y <= rect.Top + rect.Height + tolerance;
     }
 
     private void AnimateEdgeTo(double left, double top, bool animated, bool hiding)
@@ -1865,12 +2030,13 @@ public partial class DockWindow : Window
     {
         // 排查"悬浮栏跑到屏幕外"这类问题用。原先是"只记 40 条"，可状态机的关键一笔
         // （比如贴边状态被清空）常常还没轮到就停写了；改成按体积封顶，够用又不失控。
+        // 封顶的做法是"满了重开一份"而不是"停写"—— 停写会让事后排查恰好看不到关键那段。
         try
         {
             var path = Path.Combine(Path.GetTempPath(), "ExplorerDock.dock.log");
 
             var info = new FileInfo(path);
-            if (info.Exists && info.Length > 512 * 1024) return;
+            if (info.Exists && info.Length > 512 * 1024) File.Delete(path);
 
             File.AppendAllText(
                 path,
@@ -2040,6 +2206,65 @@ public partial class DockWindow : Window
         }
 
         UpdateScrollerMaxWidth();
+        ApplyEdgeAlignment();
+    }
+
+    /// <summary>
+    /// 内容对齐跟着贴边侧走：**贴右边时内容右对齐**。
+    ///
+    /// 为什么需要：窗口宽度是 SizeToContent（跟着内容变），贴右边时 ReanchorEdgeDock 让左边缘
+    /// 往左移、右边缘钉在屏幕上；可内容默认是左对齐（贴窗口左边）的，于是"窗口左移"直接变成
+    /// "已有按钮整体左跳"—— 用户看到的就是"宽度一变、位置就波动"。
+    /// 改成右对齐后，内容贴住右边缘不动，宽度增长时新按钮从**左侧**长出来。
+    /// 贴左/上/下与原来完全一致（仍是默认的左对齐）。
+    /// </summary>
+    private void ApplyEdgeAlignment()
+    {
+        // 贴右边时每一行各自贴右，其它情况恢复默认的拉伸（= 原行为）
+        bool right = _edgeSide == DockEdge.Right;
+        var alignment = right ? HorizontalAlignment.Right : HorizontalAlignment.Stretch;
+
+        // ① 每一行各自贴右 —— 这是关键的一步。
+        //
+        // 横幅模式下行宽本来是被拉伸到 _itemsHost 的宽度的（= 最宽那一行的宽度），
+        // 窗口因为某一行变宽而把左边缘往左挪（保持贴住屏幕右边）时，
+        // 那些**本来就窄的行**会被跟着一起平移，用户看到的就是"位置波动"。
+        // 让每行贴右之后，窄行的右边缘钉在窗口右边缘上 —— 屏幕位置就不动了。
+        foreach (var child in _itemsHost.Children)
+        {
+            if (child is StackPanel row && row.HorizontalAlignment != alignment)
+            {
+                row.HorizontalAlignment = alignment;
+            }
+        }
+
+        // ② 内容块整体在滚动区里的位置：堆叠模式下 _itemsHost 比视口窄时这一步才看得出来
+        if (_scroller.HorizontalContentAlignment != alignment)
+        {
+            _scroller.HorizontalContentAlignment = alignment;
+
+            // 对齐会改变"内容有没有溢出视口"的判定，顺手把滚动箭头的显隐刷一遍
+            QueueScrollButtonUpdate();
+        }
+
+        // ③ 按钮内部也镜像：贴右边时排成 [文字][图标]（图标靠右，文字紧贴它的左侧）。
+        //
+        // 用 FlowDirection 而不是手动调换 Children：一个属性同时搞定子项次序与 Margin 的
+        // 左右镜像（文字与图标之间那 9px 间距会自动换到另一侧）。
+        // label 自己必须重置回 LeftToRight —— 否则标题里的中英数与下划线会按 RTL 规则重排。
+        var direction = right ? FlowDirection.RightToLeft : FlowDirection.LeftToRight;
+
+        foreach (var visual in _items.Values)
+        {
+            if (visual.Container.Child is not StackPanel inner) continue;
+
+            if (inner.FlowDirection != direction) inner.FlowDirection = direction;
+
+            if (visual.Label.FlowDirection != FlowDirection.LeftToRight)
+            {
+                visual.Label.FlowDirection = FlowDirection.LeftToRight;
+            }
+        }
     }
 
     /// <summary>滚动箭头的外形：左右箭头是窄竖条，上下箭头是扁横条。</summary>
@@ -2156,7 +2381,10 @@ public partial class DockWindow : Window
         var seen = new HashSet<(IntPtr Handle, int TabIndex)>();
         var rowSequence = new List<string>();
         bool added = false;
-        bool wasAtRight = _scroller.ScrollableWidth - _scroller.HorizontalOffset < 24;
+        // 贴右边时内容是从右往左长的（见 ApplyEdgeAlignment）：只要新窗口进来就跟到右端，
+        // 否则视口停在左边、新按钮看不见 —— 观感就是"越往右边长、越看不见"。
+        bool wasAtRight = _edgeSide == DockEdge.Right
+            || _scroller.ScrollableWidth - _scroller.HorizontalOffset < 24;
 
         foreach (var info in snapshot.Windows)
         {
@@ -2200,7 +2428,10 @@ public partial class DockWindow : Window
         RemoveEmptyRows();
         ApplyRowOrder(rowSequence);
 
-        // 新窗口排在右边：用户本来就停在最右端的话，继续跟着最右端走
+        // 新加进来的行也要跟着贴边侧对齐（贴右边时每行各自贴右，见 ApplyEdgeAlignment）
+        ApplyEdgeAlignment();
+
+        // 新窗口排在右边：贴右边时（或用户本来就停在最右端时）继续跟着最右端走
         if (added && wasAtRight)
         {
             Dispatcher.BeginInvoke(new Action(() =>
@@ -2483,7 +2714,7 @@ public partial class DockWindow : Window
 
     /// <summary>
     /// 点悬浮栏按钮的诊断日志（单独一个文件，不占 Diag 的 40 条额度）。
-    /// 超过 512KB 就不再写，免得长时间使用把文件撑大。
+    /// 超过 512KB 就重开一份，免得长时间使用把文件撑大（但不会停写）。
     /// </summary>
     private static void DiagClick(string message)
     {
@@ -2492,7 +2723,7 @@ public partial class DockWindow : Window
             var path = Path.Combine(Path.GetTempPath(), "ExplorerDock.click.log");
 
             var info = new FileInfo(path);
-            if (info.Exists && info.Length > 512 * 1024) return;
+            if (info.Exists && info.Length > 512 * 1024) File.Delete(path);
 
             File.AppendAllText(path, $"{DateTime.Now:MM-dd HH:mm:ss.fff} {message}{Environment.NewLine}");
         }

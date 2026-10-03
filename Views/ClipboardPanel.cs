@@ -1045,6 +1045,25 @@ internal sealed class ClipboardPanel : Window
         _taskbarButtonsLoaded = true;
         _taskbarButtons.Clear();
 
+        // 任务栏的 UIA 子树同样要经隔离调用：系统托盘卡住时，不能让界面线程陪着一起卡。
+        var loaded = Services.BoundedCall.Run(
+            "uia:taskbar",
+            1500,
+            ReadTaskbarButtonsCore,
+            new List<(Rect Bounds, string Name)>(),
+            "uia: taskbar buttons",
+            sta: true);
+
+        _taskbarButtons.AddRange(loaded);
+
+        Services.ClipboardMonitor.Log($"taskbar buttons loaded={_taskbarButtons.Count}");
+    }
+
+    /// <summary>真正去问 UIA 的那一段，跑在隔离线程上（见 <see cref="LoadTaskbarButtons"/>）。</summary>
+    private static List<(Rect Bounds, string Name)> ReadTaskbarButtonsCore()
+    {
+        var found = new List<(Rect Bounds, string Name)>();
+
         try
         {
             foreach (var shellClass in new[] { "Shell_TrayWnd", "Shell_SecondaryTrayWnd" })
@@ -1074,7 +1093,7 @@ internal sealed class ClipboardPanel : Window
                         var bounds = element.Current.BoundingRectangle;
                         if (bounds.IsEmpty || bounds.Width < 4 || bounds.Height < 4) continue;
 
-                        _taskbarButtons.Add((bounds, name));
+                        found.Add((bounds, name));
                     }
                     catch
                     {
@@ -1088,7 +1107,7 @@ internal sealed class ClipboardPanel : Window
             // UIA 不可用就当没有任务栏按钮
         }
 
-        Services.ClipboardMonitor.Log($"taskbar buttons loaded={_taskbarButtons.Count}");
+        return found;
     }
 
     /// <summary>去掉任务栏按钮名尾部的「 - 1 个运行窗口」「 和另外 N 个页面」这类计数后缀。</summary>

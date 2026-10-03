@@ -1111,6 +1111,9 @@ public partial class App : Application
 
             string[] names =
             {
+                // 自启两份排在最前面：用户报"开机不自启"时先看它们
+                "ExplorerDock.startup.log",
+                "ExplorerDock.host.log",
                 "ExplorerDock.dock.log",
                 "ExplorerDock.click.log",
                 "ExplorerDock.clipboard.log",
@@ -1334,33 +1337,65 @@ public partial class App : Application
         _taskbar?.Restore(hwnd);
     }
 
+    /// <summary>归还任务栏按钮的时间预算：退出与应急出口都不许在这上面卡住。</summary>
+    private static readonly TimeSpan RestoreBudget = TimeSpan.FromMilliseconds(1500);
+
+    /// <summary>
+    /// 把按钮还给任务栏（清掉统一分组 + 还原被摘除的按钮），带时间预算。
+    ///
+    /// 为什么要有预算：未响应的窗口会让 shell 忙住，ITaskbarList.AddTab 这种同步 COM 调用可能长时间不返回。
+    /// 逐个等下去的结果就是"退出卡在这儿"或"按钮一直还不回去"。所以给整段一个上限，超了就走人
+    /// （单次调用本身也有超时保护，见 TaskbarTweaker）。
+    /// </summary>
+    private static (int Restored, int Total) RestoreTaskbarButtons(TimeSpan budget)
+    {
+        var deadline = DateTime.UtcNow + budget;
+        int restored = 0;
+
+        try
+        {
+            // 文件夹窗口 + 按当前设置算出来的其他程序窗口（自动接管也一并还原）
+            var handles = new HashSet<IntPtr>();
+
+            foreach (var hwnd in ExplorerWatcher.EnumerateWindows()) handles.Add(hwnd);
+
+            foreach (var hwnd in ExplorerWatcher.ComputeScope(Settings.AutoTakeoverMultiWindow, Settings.TakeoverProcesses))
+            {
+                handles.Add(hwnd);
+            }
+
+            using var taskbar = new TaskbarTweaker();
+
+            foreach (var hwnd in handles)
+            {
+                if (DateTime.UtcNow >= deadline) break;
+
+                try
+                {
+                    AppUserModelId.TrySet(hwnd, null);
+                    if (taskbar.Restore(hwnd)) restored++;
+                }
+                catch
+                {
+                    // 窗口可能已经关了
+                }
+            }
+
+            return (restored, handles.Count);
+        }
+        catch (Exception ex)
+        {
+            AltTabController.Log($"归还任务栏按钮失败 {ex.GetType().Name}: {ex.Message}");
+            return (restored, 0);
+        }
+    }
+
     /// <summary>应急：把所有被接管的窗口还给任务栏（清掉统一分组 + 还原可能被摘除的按钮）。</summary>
     public static void RestoreEverythingToTaskbar()
     {
-        using var taskbar = new TaskbarTweaker();
+        var (restored, total) = RestoreTaskbarButtons(RestoreBudget);
 
-        // 文件夹窗口 + 按当前设置算出来的其他程序窗口（自动接管也一并还原）
-        var handles = new HashSet<IntPtr>();
-
-        foreach (var hwnd in ExplorerWatcher.EnumerateWindows()) handles.Add(hwnd);
-
-        foreach (var hwnd in ExplorerWatcher.ComputeScope(Settings.AutoTakeoverMultiWindow, Settings.TakeoverProcesses))
-        {
-            handles.Add(hwnd);
-        }
-
-        foreach (var hwnd in handles)
-        {
-            try
-            {
-                AppUserModelId.TrySet(hwnd, null);
-                taskbar.Restore(hwnd);
-            }
-            catch
-            {
-                // 窗口可能已经关了
-            }
-        }
+        AltTabController.Log($"应急归还：{restored}/{total} 个窗口的按钮已交还");
     }
 
     /// <summary>把所有窗口还回任务栏，并暂停接管，方便用户对照。</summary>
@@ -1387,7 +1422,12 @@ public partial class App : Application
     /// 而计划任务能标 /RL HIGHEST，登录时静默地以管理员身份跑起来，不弹 UAC。
     /// </summary>
     private void ApplyStartupRegistration()
-        => StartupRegistration.Apply(Settings.RunAtStartup, Settings.RunElevated, Environment.ProcessPath);
+    {
+        StartupRegistration.Apply(Settings.RunAtStartup, Settings.RunElevated, Environment.ProcessPath);
+
+        // 顺手把这一刻的自启状态（Run 键 / 启动应用是否禁用 / 任务设置 / 电源）记进 startup.log
+        StartupRegistration.LogSnapshot("ui");
+    }
 
 
     // ---------- 主题 ----------
@@ -1664,6 +1704,10 @@ public partial class App : Application
         {
             // 忽略
         }
+
+        // 自己再兜一遍归还：宿主可能正卡在未响应窗口的 COM 调用里，退出不能因此把任务栏按钮留在我们手上
+        var (restoredButtons, totalWindows) = RestoreTaskbarButtons(RestoreBudget);
+        AltTabController.Log($"退出归还：{restoredButtons}/{totalWindows} 个窗口的按钮已交还（预算 {RestoreBudget.TotalMilliseconds:0}ms）");
 
         try
         {
