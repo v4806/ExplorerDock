@@ -103,8 +103,13 @@ internal sealed class TrayIcon : IDisposable
         _onRightClick = onRightClick;
         _onDoubleClick = onDoubleClick;
 
-        // 托盘消息得有个窗口来收：直接挂在悬浮栏窗口上，不另建隐藏窗口
-        var handle = new WindowInteropHelper(owner).Handle;
+        // 托盘消息得有个窗口来收：直接挂在悬浮栏窗口上，不另建隐藏窗口。
+        // 悬浮栏可能从没显示过（设置里 ShowDock=false，启动时就不会 Show()），
+        // 这时窗口还没有 HWND，Handle 是 0，FromHwnd(0) 会抛 "Hwnd of zero is not valid."。
+        // EnsureHandle() 只在没有时按需创建，不会把窗口显示出来。
+        var interop = new WindowInteropHelper(owner);
+        var handle = interop.Handle;
+        if (handle == IntPtr.Zero) handle = interop.EnsureHandle();
 
         _source = HwndSource.FromHwnd(handle);
         _source?.AddHook(WndProc);
