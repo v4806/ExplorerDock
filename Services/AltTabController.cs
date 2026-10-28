@@ -585,6 +585,7 @@ internal sealed class AltTabController : IDisposable
         if (_overlay is not null) return _overlay;
 
         _overlay = new AltTabOverlay();
+        _overlay.ApplyMouseHoverSelect(App.Settings.AltTabMouseHoverSelect);
         _overlay.Hovered += OnHovered;
         _overlay.Clicked += OnClicked;
         _overlay.Scrolled += OnScrolled;
@@ -593,6 +594,9 @@ internal sealed class AltTabController : IDisposable
         _overlay.Preload();
         return _overlay;
     }
+
+    /// <summary>设置里「鼠标悬停切换选中」变化后立即生效（面板可能正开着）。</summary>
+    public void ApplyMouseHoverSelect() => EnsureOverlay().ApplyMouseHoverSelect(App.Settings.AltTabMouseHoverSelect);
 
     private static int InitialIndex(IReadOnlyList<AltTabWindowInfo> items, IntPtr foreground)
     {

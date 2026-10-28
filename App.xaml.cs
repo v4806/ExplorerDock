@@ -312,7 +312,7 @@ public partial class App : Application
         }
         else
         {
-            _windowHost = new LocalWindowHost(Settings.TakeoverEnabled);
+            _windowHost = new LocalWindowHost(Settings.TakeoverEnabled, Settings.TakeoverExplorer);
         }
 
         _windowHost.SnapshotUpdated += OnSnapshotUpdated;
@@ -325,12 +325,9 @@ public partial class App : Application
         _altTab = new AltTabController(this);
         _altTab.Start();
 
-        // 剪贴板库：先解密载入历史，再开始监听剪贴板变化；随后接上 Win+V 接管
-        _clipStore = new ClipboardStore();
-        _clipStore.Load();
-        _clipMonitor = new ClipboardMonitor(_clipStore);
-        _clipboard = new ClipboardController(this, _clipStore);
-        _clipboard.Start();
+        // 剪贴板库：先解密载入历史，再开始监听剪贴板变化；随后接上 Win+V 接管。
+        // 总开关关着（issue #11）就完全不创建 —— 不监听、不占内存，给不用这个功能的人一个零占用的选项。
+        if (Settings.ClipboardEnabled) StartClipboard();
 
         _quitEvent = new EventWaitHandle(false, EventResetMode.ManualReset, QuitEventName);
         StartQuitListener();
@@ -573,6 +570,25 @@ public partial class App : Application
         _windowHost?.SetTakeover(enabled);
     }
 
+    /// <summary>
+    /// 是否接管文件资源管理器窗口（默认接管，可在「接管指定程序…」里取消，issue #11）。
+    /// 关闭后文件夹窗口的任务栏按钮还回去、悬浮栏不再显示、Alt+Tab 也不再合并它们。
+    /// </summary>
+    public void SetExplorerTakeover(bool enabled)
+    {
+        Settings.TakeoverExplorer = enabled;
+        Settings.Save();
+
+        try
+        {
+            _windowHost?.SetExplorerTakeover(enabled);
+        }
+        catch
+        {
+            // 宿主没起来：下次启动按 settings.json 初始化
+        }
+    }
+
     /// <summary>多窗口程序自动接管：同名程序窗口达到 2 个就自动搬上悬浮栏。</summary>
     public void SetAutoTakeoverMultiWindow(bool enabled)
     {
@@ -675,7 +691,8 @@ public partial class App : Application
         {
             _windowHost?.SetKeyState(
                 Settings.AltTabTakeover,
-                Settings.ClipboardTakeover,
+                // 总开关关着时 Win+V 一律交还系统，哪怕"接管 Win+V"这一项还勾着
+                Settings.ClipboardTakeover && Settings.ClipboardEnabled,
                 _altTab?.PanelBusy == true);
         }
         catch
@@ -702,7 +719,24 @@ public partial class App : Application
     public static long CurrentClipboardBytes => (Current as App)?._clipStore?.TotalBytes ?? 0;
 
     /// <summary>打开（或收起）剪贴板面板。</summary>
-    public void ToggleClipboardPanel() => _clipboard?.Toggle();
+    public void ToggleClipboardPanel()
+    {
+        if (_clipboard is null)
+        {
+            NotifyClipboardDisabled();
+            return;
+        }
+
+        _clipboard.Toggle();
+    }
+
+    /// <summary>剪贴板历史被总开关关掉时，告诉用户去哪打开，而不是点了没反应。</summary>
+    private static void NotifyClipboardDisabled()
+    {
+        Views.ConfirmDialog.Notify(
+            "剪贴板历史已关闭",
+            "在托盘菜单的「剪贴板（Win+V）」里勾选「启用剪贴板历史」，再按 Win+V 就能用了。");
+    }
 
     /// <summary>收起剪贴板面板（弹悬浮栏菜单前先收，免得菜单点别处关不掉）。</summary>
     public void HideClipboardPanel()
@@ -737,7 +771,11 @@ public partial class App : Application
     /// <summary>打开剪贴板面板。</summary>
     public void OpenClipboardPanel()
     {
-        if (_clipboard is null) return;
+        if (_clipboard is null)
+        {
+            NotifyClipboardDisabled();
+            return;
+        }
 
         try
         {
@@ -1175,7 +1213,11 @@ public partial class App : Application
     /// <summary>清空剪贴板历史（保留收藏）。</summary>
     public void ClearClipboardHistory()
     {
-        if (_clipStore is null) return;
+        if (_clipStore is null)
+        {
+            NotifyClipboardDisabled();
+            return;
+        }
 
         if (!Views.ConfirmDialog.Confirm(
                 "清空剪贴板历史？",
@@ -1236,12 +1278,115 @@ public partial class App : Application
         }
     }
 
+    /// <summary>
+    /// Alt+Tab 面板里鼠标悬停是否直接改变选中项（issue #8）。
+    /// 默认关：鼠标停在屏幕中间时，面板弹出后轻微一动就会抢走键盘选择。
+    /// </summary>
+    public void SetAltTabMouseHoverSelect(bool enabled)
+    {
+        Settings.AltTabMouseHoverSelect = enabled;
+        Settings.Save();
+
+        // 面板在界面进程里画，改动直接生效（面板正开着也能用）
+        _altTab?.ApplyMouseHoverSelect();
+    }
+
     /// <summary>是否接管 Win+V（用本软件的面板替换系统剪贴板历史）。</summary>
     public void SetClipboardTakeover(bool enabled)
     {
         Settings.ClipboardTakeover = enabled;
         Settings.Save();
         PushKeyState();
+    }
+
+    /// <summary>
+    /// 剪贴板历史总开关（issue #11）。
+    ///
+    /// 关掉时把监听线程、面板、内存里的历史一起释放（保存落盘后释放），
+    /// 重新打开时再从磁盘载入 —— 不用这个功能的用户不承担任何后台占用。
+    /// </summary>
+    public void SetClipboardEnabled(bool enabled)
+    {
+        Settings.ClipboardEnabled = enabled;
+        Settings.Save();
+
+        if (enabled)
+        {
+            StartClipboard();
+        }
+        else
+        {
+            try
+            {
+                _clipboard?.Dispose();
+            }
+            catch
+            {
+                // 忽略
+            }
+
+            _clipboard = null;
+
+            try
+            {
+                _clipMonitor?.Dispose();
+            }
+            catch
+            {
+                // 忽略
+            }
+
+            _clipMonitor = null;
+
+            try
+            {
+                _clipStore?.SaveNow();
+                _clipStore?.Dispose();
+            }
+            catch
+            {
+                // 忽略
+            }
+
+            _clipStore = null;
+            _clipboardStarted = false;
+        }
+
+        // Win+V 能不能接管取决于总开关：关掉后立刻把热键交还系统
+        PushKeyState();
+    }
+
+    /// <summary>剪贴板历史是否已经启动（总开关关闭时为 false）。</summary>
+    private bool _clipboardStarted;
+
+    /// <summary>
+    /// 启动剪贴板历史：解密载入历史 → 开始监听剪贴板变化 → 接上 Win+V 接管。
+    /// 总开关关闭时不调用；重复调用无副作用。
+    /// </summary>
+    private void StartClipboard()
+    {
+        if (_clipboardStarted) return;
+        _clipboardStarted = true;
+
+        try
+        {
+            var store = _clipStore ??= new ClipboardStore();
+            store.Load();
+
+            _clipMonitor ??= new ClipboardMonitor(store);
+
+            if (_clipboard is null)
+            {
+                _clipboard = new ClipboardController(this, store);
+                _clipboard.Start();
+            }
+        }
+        catch (Exception ex)
+        {
+            // 剪贴板起不来不影响主功能，但要让用户知道这次没起来
+            _clipboardStarted = false;
+            Views.ConfirmDialog.Notify("剪贴板初始化失败", $"{ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     public void SetHideWhenEmpty(bool enabled)

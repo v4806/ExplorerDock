@@ -52,6 +52,14 @@ internal sealed class ProcessPickerWindow : Window
 
         public bool Selected { get; set; }
 
+        /// <summary>这是"文件资源管理器"那一特殊行（默认接管、可在这里取消，issue #11）。</summary>
+        public bool IsExplorer { get; init; }
+
+        /// <summary>特殊行的显示名与说明（空串时按普通程序显示）。</summary>
+        public string DisplayName { get; init; } = string.Empty;
+
+        public string DisplayDetail { get; init; } = string.Empty;
+
         public Border Row { get; set; } = null!;
 
         public Border Box { get; set; } = null!;
@@ -216,6 +224,23 @@ internal sealed class ProcessPickerWindow : Window
         _list.Children.Clear();
         _entries.Clear();
 
+        // 文件资源管理器：默认接管，但它不在"手动指定名单"里（走单独的 TakeoverExplorer 开关），
+        // 所以单独放一行在最上面，让用户可以取消接管（issue #11）。
+        var explorer = new Entry
+        {
+            IsExplorer = true,
+            Name = "explorer",
+            DisplayName = "文件资源管理器",
+            DisplayDetail = "默认接管：勾掉之后文件夹窗口留在任务栏，悬浮栏与 Alt+Tab 也不再合并它们",
+            Selected = App.Settings.TakeoverExplorer,
+            ExePath = System.IO.Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+                "explorer.exe"),
+        };
+
+        _entries.Add(explorer);
+        AddEntry(explorer, running: true);
+
         var selected = new HashSet<string>(
             App.Settings.TakeoverProcesses.Select(TakeoverState.Normalize),
             StringComparer.OrdinalIgnoreCase);
@@ -290,18 +315,25 @@ internal sealed class ProcessPickerWindow : Window
 
         var titleBlock = new TextBlock
         {
-            Text = running ? entry.Name : entry.Name + "（当前未运行）",
+            Text = entry.DisplayName.Length > 0
+                ? entry.DisplayName
+                : running ? entry.Name : entry.Name + "（当前未运行）",
             FontSize = _palette.FontSizeHeadline,
             Foreground = _textBrush,
         };
 
         var detailBlock = new TextBlock
         {
-            Text = running && entry.WindowCount > 0 ? $"{entry.WindowCount} 个窗口" : entry.SampleTitle.Length > 0 ? entry.SampleTitle : "下次开窗时接管",
+            Text = entry.DisplayDetail.Length > 0
+                ? entry.DisplayDetail
+                : running && entry.WindowCount > 0
+                    ? $"{entry.WindowCount} 个窗口"
+                    : entry.SampleTitle.Length > 0 ? entry.SampleTitle : "下次开窗时接管",
             FontSize = _palette.FontSizeSmall,
             Foreground = _mutedBrush,
             Margin = new Thickness(0, 2, 0, 0),
             TextTrimming = TextTrimming.CharacterEllipsis,
+            TextWrapping = TextWrapping.NoWrap,
         };
 
         texts.Children.Add(titleBlock);
@@ -379,11 +411,11 @@ internal sealed class ProcessPickerWindow : Window
 
     private void RefreshStatus()
     {
-        int selected = _entries.Count(e => e.Selected);
+        int selected = _entries.Count(e => e.Selected && !e.IsExplorer);
         int running = _entries.Count(e => e.WindowCount > 0);
 
-        _status.Text = _entries.Count == 0
-            ? "没有发现可接管的程序；可以点「浏览 exe…」手动指定。"
+        _status.Text = _entries.Count <= 1
+            ? "没有发现其它可接管的程序；可以点「浏览 exe…」手动指定。"
             : $"扫描到 {running} 个有窗口的程序，已勾选 {selected} 个。";
     }
 
@@ -421,7 +453,11 @@ internal sealed class ProcessPickerWindow : Window
 
     private void Save()
     {
-        _app.SetTakeoverProcesses(_entries.Where(e => e.Selected).Select(e => e.Name).ToList());
+        // 资源管理器单独一项：写回 TakeoverExplorer（不在手动名单里）
+        var explorer = _entries.FirstOrDefault(e => e.IsExplorer);
+        if (explorer is not null) _app.SetExplorerTakeover(explorer.Selected);
+
+        _app.SetTakeoverProcesses(_entries.Where(e => e.Selected && !e.IsExplorer).Select(e => e.Name).ToList());
         Close();
     }
 

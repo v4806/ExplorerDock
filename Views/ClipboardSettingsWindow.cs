@@ -32,6 +32,9 @@ internal sealed class ClipboardSettingsWindow : Window
     /// <summary>呼出位置的两个选项（false = 固定位置，true = 鼠标位置）。</summary>
     private readonly List<(bool Value, Border Button, TextBlock Label)> _positionButtons = new();
 
+    /// <summary>剪贴板历史总开关的两个选项（issue #11）。</summary>
+    private readonly List<(bool Value, Border Button, TextBlock Label)> _enabledButtons = new();
+
     private readonly Brush _textBrush;
     private readonly Brush _mutedBrush;
     private readonly Brush _lineBrush;
@@ -52,6 +55,7 @@ internal sealed class ClipboardSettingsWindow : Window
     private int _maxItems;
     private long _maxBytes;
     private bool _atCursor;
+    private bool _enabled;
     private bool _saved;
     private TextBox? _customBox;
     private TextBox? _customByteBox;
@@ -85,6 +89,7 @@ internal sealed class ClipboardSettingsWindow : Window
         _maxItems = App.Settings.ClipboardMaxItems;
         _maxBytes = App.Settings.ClipboardMaxBytes;
         _atCursor = App.Settings.ClipboardAtCursor;
+        _enabled = App.Settings.ClipboardEnabled;
 
         WindowStyle = WindowStyle.None;
         AllowsTransparency = true;
@@ -117,6 +122,29 @@ internal sealed class ClipboardSettingsWindow : Window
             Foreground = _mutedBrush,
             TextWrapping = TextWrapping.Wrap,
         });
+
+        // ---------- 总开关（issue #11） ----------
+        stack.Children.Add(SectionTitle("剪贴板历史"));
+        stack.Children.Add(Hint("关掉后不再后台监听剪贴板、不响应 Win+V，也不占用内存；"
+            + "历史记录会保存到磁盘，重新打开时还在。"));
+
+        var enabledRow = new WrapPanel { Margin = new Thickness(0, 8, 0, 0) };
+
+        enabledRow.Children.Add(ChoiceButton("开启", _enabled, () =>
+        {
+            _enabled = true;
+            RefreshChoices();
+        }, out var enabledButton, out var enabledLabel));
+        _enabledButtons.Add((true, enabledButton, enabledLabel));
+
+        enabledRow.Children.Add(ChoiceButton("关闭", !_enabled, () =>
+        {
+            _enabled = false;
+            RefreshChoices();
+        }, out var disabledButton, out var disabledLabel));
+        _enabledButtons.Add((false, disabledButton, disabledLabel));
+
+        stack.Children.Add(enabledRow);
 
         // ---------- 呼出位置 ----------
         stack.Children.Add(SectionTitle("呼出位置"));
@@ -348,6 +376,12 @@ internal sealed class ClipboardSettingsWindow : Window
         App.Settings.ClipboardAtCursor = _atCursor;
         App.Settings.Save();
 
+        // 总开关最后应用：它会停/启监听线程，前面的数值设置要先落盘
+        if (_enabled != App.Settings.ClipboardEnabled && Application.Current is App app)
+        {
+            app.SetClipboardEnabled(_enabled);
+        }
+
         _saved = true;
         Close();
     }
@@ -367,6 +401,11 @@ internal sealed class ClipboardSettingsWindow : Window
         foreach (var (value, button, label) in _positionButtons)
         {
             ApplyChoice(button, label, value == _atCursor);
+        }
+
+        foreach (var (value, button, label) in _enabledButtons)
+        {
+            ApplyChoice(button, label, value == _enabled);
         }
     }
 

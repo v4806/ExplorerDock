@@ -51,6 +51,15 @@ internal sealed class ClipboardPanel : Window
     private readonly StackPanel _list;
     private readonly TextBlock _status;
 
+    /// <summary>顶部搜索框。它单独占一行：不能塞进 _tabRow —— 那里每次 Refresh 都被清空重建，放进去每敲一个字都会掉焦点。</summary>
+    private readonly TextBox _searchBox;
+
+    /// <summary>搜索框的占位提示（"搜索剪贴板…"），输入框为空时显示。</summary>
+    private readonly TextBlock _searchPlaceholder;
+
+    /// <summary>搜索框的外框：背景/描边/圆角都跟随主题。</summary>
+    private readonly Border _searchHost;
+
     /// <summary>整体缩放（跟悬浮栏的 Scale 设置联动）。</summary>
     private double _scale = 1.0;
 
@@ -157,6 +166,12 @@ internal sealed class ClipboardPanel : Window
     private bool _suppressDeactivate;
     private int _selected = -1;
 
+    /// <summary>当前搜索词（已去掉首尾空白）；空串表示不过滤。</summary>
+    private string _searchText = string.Empty;
+
+    /// <summary>代码清空搜索框时置位，避免 TextChanged 再触发一次列表重建。</summary>
+    private bool _suppressSearchChange;
+
     public ClipboardPanel(ClipboardStore store)
     {
         _store = store;
@@ -191,6 +206,61 @@ internal sealed class ClipboardPanel : Window
 
         _status = new TextBlock { FontSize = _palette.FontSizeSmall, Margin = new Thickness(16, 8, 16, 10), VerticalAlignment = VerticalAlignment.Center };
 
+        // 顶部搜索框：跟标签页、列表项同一套自绘风格（背景 ghost、圆角按主题、文字/占位都用主题色）。
+        // 输入即过滤（TextChanged → Refresh），所以这里没有任何"确定"按钮。
+        _searchBox = new TextBox
+        {
+            FontFamily = _palette.Typeface,
+            FontSize = _palette.FontSizeBody,
+            Foreground = _textBrush,
+            CaretBrush = _textBrush,
+            Background = Brushes.Transparent,
+            BorderThickness = new Thickness(0),
+            Padding = new Thickness(0),
+            VerticalContentAlignment = VerticalAlignment.Center,
+            // 默认的虚线焦点框跟自绘主题不搭，去掉
+            FocusVisualStyle = null,
+        };
+
+        _searchBox.TextChanged += (_, _) => OnSearchTextChanged();
+
+        _searchPlaceholder = new TextBlock
+        {
+            Text = "搜索剪贴板…",
+            FontFamily = _palette.Typeface,
+            FontSize = _palette.FontSizeBody,
+            Foreground = _mutedBrush,
+            Margin = new Thickness(1, 0, 0, 0),
+            VerticalAlignment = VerticalAlignment.Center,
+            HorizontalAlignment = HorizontalAlignment.Left,
+            IsHitTestVisible = false,
+        };
+
+        var searchGrid = new Grid();
+        searchGrid.Children.Add(_searchBox);
+        searchGrid.Children.Add(_searchPlaceholder);
+
+        _searchHost = new Border
+        {
+            Height = 34,
+            Margin = new Thickness(14, 8, 14, 0),
+            Padding = new Thickness(10, 0, 10, 0),
+            CornerRadius = new CornerRadius(_palette.ButtonCornerRadius),
+            Background = _ghostBrush,
+            BorderThickness = new Thickness(1),
+            BorderBrush = _lineBrush,
+            Child = searchGrid,
+            Cursor = Cursors.IBeam,
+        };
+
+        // 点搜索框（包括左右留白）都聚焦到输入框；
+        // 标记已处理，否则窗口级 MouseLeftButtonDown 会当成"按住面板空白处拖动"
+        _searchHost.MouseLeftButtonDown += (_, e) =>
+        {
+            _searchBox.Focus();
+            e.Handled = true;
+        };
+
         // 收藏页左侧的分组栏（只有收藏页才显示）：
         // 上半截是可滚动的分组列表，下半截固定放"＋ 新建分组" ——
         // 分组多了也不会把新建入口挤出可视区。
@@ -223,13 +293,16 @@ internal sealed class ClipboardPanel : Window
         content.Children.Add(_scroller);
 
         var layout = new Grid();
-        layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-        layout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+        layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });   // 标签页
+        layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });   // 搜索框
+        layout.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });   // 列表
+        layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });   // 状态栏
         Grid.SetRow(_tabRow, 0);
-        Grid.SetRow(content, 1);
-        Grid.SetRow(_status, 2);
+        Grid.SetRow(_searchHost, 1);
+        Grid.SetRow(content, 2);
+        Grid.SetRow(_status, 3);
         layout.Children.Add(_tabRow);
+        layout.Children.Add(_searchHost);
         layout.Children.Add(content);
         layout.Children.Add(_status);
 
@@ -468,6 +541,9 @@ internal sealed class ClipboardPanel : Window
     {
         _suppressDeactivate = true;
 
+        // 每次弹出都从"全量列表"开始：搜索条件只在这一次弹出期间有效
+        ResetSearch();
+
         ApplyTone();
         Refresh();
 
@@ -500,6 +576,12 @@ internal sealed class ClipboardPanel : Window
         Focus();
         Keyboard.Focus(this);
         NativeMethods.SetFocus(handle);
+
+        // 再把焦点落到搜索框上：面板一弹出就能直接打字过滤。
+        // ↑↓/回车/Esc 由窗口的 PreviewKeyDown（隧道事件，先于输入框）统一处理，
+        // 所以列表的键盘操作不会因为焦点在输入框里而失效。
+        _searchBox.Focus();
+        Keyboard.Focus(_searchBox);
 
         // 等这一轮消息彻底处理完再恢复"失活即隐藏"，跳过显示瞬间的那次伪失活
         Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(() => _suppressDeactivate = false));
@@ -583,6 +665,9 @@ internal sealed class ClipboardPanel : Window
                 app.SetDockInteraction(true);
             }
         }
+
+        // 收起时把搜索清掉：搜索条件只在面板开着的时候有效，下次打开恢复全量列表
+        ResetSearch();
 
         Hide();
         Hidden?.Invoke();
@@ -668,15 +753,16 @@ internal sealed class ClipboardPanel : Window
         _list.Children.Clear();
         _visuals.Clear();
 
-        var items = _showFavorites
-            ? _store.Items.Where(i => i.Favorited && MatchesGroupFilter(i)).ToList()
-            : _store.Items.ToList();
+        // 收藏页条件（收藏 + 分组）与搜索条件叠加
+        var items = _store.Items.Where(MatchesItemFilters).ToList();
 
         if (items.Count == 0)
         {
             _list.Children.Add(new TextBlock
             {
-                Text = _showFavorites ? "还没有收藏。点记录右边的 ☆ 就能收进来。" : "还没有记录。复制点什么就会出现在这里。",
+                Text = HasSearchText
+                    ? "没有匹配的记录。换个关键词试试。"
+                    : (_showFavorites ? "还没有收藏。点记录右边的 ☆ 就能收进来。" : "还没有记录。复制点什么就会出现在这里。"),
                 FontSize = _palette.FontSizeBody,
                 Margin = new Thickness(10, 26, 10, 26),
                 TextWrapping = TextWrapping.Wrap,
@@ -698,6 +784,10 @@ internal sealed class ClipboardPanel : Window
         }
 
         UpdateStatus();
+
+        // 过滤后条数可能变少：选中下标先夹回新列表范围内，
+        // 否则 _visuals[_selected] 越界、回车/上下键也会指到不存在的条目
+        if (_selected >= _visuals.Count) _selected = _visuals.Count - 1;
 
         // 列表重建后把选中态补回来（否则重建一次高亮就没了）
         if (_selected >= 0 && _selected < _visuals.Count) ApplyItemTone(_visuals[_selected], true);
@@ -721,6 +811,129 @@ internal sealed class ClipboardPanel : Window
             if (i < SyncThumbnailCount) LoadThumbnail(visual);
             else Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() => LoadThumbnail(visual)));
         }
+    }
+
+    // ---------- 搜索 ----------
+
+    /// <summary>当前有没有在搜索（空搜索词 = 不过滤）。</summary>
+    private bool HasSearchText => _searchText.Length > 0;
+
+    /// <summary>搜索框内容变了：记关键词、更新占位提示，并立刻按新条件重建列表。</summary>
+    private void OnSearchTextChanged()
+    {
+        if (_suppressSearchChange) return;
+
+        _searchText = _searchBox.Text.Trim();
+        UpdateSearchPlaceholder();
+
+        // 面板收着的时候只记状态，等下次 Present 统一刷新
+        if (!IsVisible) return;
+
+        Refresh();
+        SetSelected(_visuals.Count > 0 ? 0 : -1);
+    }
+
+    /// <summary>占位提示只在输入框为空时显示。</summary>
+    private void UpdateSearchPlaceholder()
+    {
+        _searchPlaceholder.Visibility = _searchBox.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    /// <summary>清空搜索框并恢复"全量列表"的条件。面板每次打开/收起都调一次。</summary>
+    private void ResetSearch()
+    {
+        // 代码改 Text 也会触发 TextChanged，置位跳过那一次重建
+        _suppressSearchChange = true;
+
+        try
+        {
+            if (_searchBox.Text.Length > 0) _searchBox.Text = string.Empty;
+        }
+        finally
+        {
+            _suppressSearchChange = false;
+        }
+
+        _searchText = string.Empty;
+        UpdateSearchPlaceholder();
+    }
+
+    /// <summary>
+    /// Esc 的第一层：清空搜索并把焦点还给面板本身，面板不关。
+    /// 搜索框为空时再按 Esc 才走原来的"关闭面板"逻辑。
+    /// </summary>
+    private void ClearSearchAndUnfocus()
+    {
+        ResetSearch();
+        Refresh();
+        SetSelected(_visuals.Count > 0 ? 0 : -1);
+
+        // 回到"面板自己拿键盘焦点"的原状态：↑↓/回车继续可用，再按 Esc 才能关面板
+        Focus();
+        Keyboard.Focus(this);
+    }
+
+    /// <summary>列表过滤条件：收藏页条件（收藏 + 分组）与搜索条件叠加。</summary>
+    private bool MatchesItemFilters(ClipItem item)
+    {
+        if (_showFavorites && (!item.Favorited || !MatchesGroupFilter(item))) return false;
+
+        return MatchesSearch(item);
+    }
+
+    /// <summary>
+    /// 一条记录是否匹配当前搜索词：
+    ///   - 文本记录匹配正文（不区分大小写）；
+    ///   - 文件记录匹配文件名 / 完整路径（不区分大小写）；
+    ///   - 类型关键词："图片" 匹配图片记录，"文件" 匹配文件记录。
+    /// 搜索词为空时全部通过。
+    /// </summary>
+    private bool MatchesSearch(ClipItem item)
+    {
+        if (!HasSearchText) return true;
+
+        if (item.Text is { Length: > 0 } text
+            && text.Contains(_searchText, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        if (item.Files is { Length: > 0 } files)
+        {
+            foreach (var path in files)
+            {
+                if (string.IsNullOrWhiteSpace(path)) continue;
+
+                var name = Path.GetFileName(path);
+
+                if (path.Contains(_searchText, StringComparison.OrdinalIgnoreCase)
+                    || name.Contains(_searchText, StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+        }
+
+        // 类型关键词：输入"图片"能找出所有图片记录，输入"文件"能找出所有文件记录
+        if (item.Kind == ClipKind.Image && _searchText.Contains("图片", StringComparison.Ordinal)) return true;
+        if (item.Kind == ClipKind.Files && _searchText.Contains("文件", StringComparison.Ordinal)) return true;
+
+        return false;
+    }
+
+    /// <summary>搜索框的配色跟随主题（由 <see cref="ApplyTone"/> 调用）。</summary>
+    private void ApplySearchTone()
+    {
+        _searchHost.Background = _ghostBrush;
+        _searchHost.BorderBrush = _lineBrush;
+        _searchHost.CornerRadius = new CornerRadius(_palette.ButtonCornerRadius);
+        _searchBox.Foreground = _textBrush;
+        _searchBox.CaretBrush = _textBrush;
+        _searchBox.FontFamily = _palette.Typeface;
+        _searchBox.FontSize = _palette.FontSizeBody;
+        _searchPlaceholder.Foreground = _mutedBrush;
+        _searchPlaceholder.FontFamily = _palette.Typeface;
+        _searchPlaceholder.FontSize = _palette.FontSizeBody;
     }
 
     private void BuildTabs()
@@ -1694,6 +1907,10 @@ internal sealed class ClipboardPanel : Window
         var key = e.Key == Key.ImeProcessed ? e.ImeProcessedKey : e.Key;
         Services.ClipboardMonitor.Log($"panel key={e.Key}->{key} selected={_selected}");
 
+        // 搜索框里正在用输入法组字时，按键留给输入法和输入框：
+        // 尤其回车在中文输入法里是"上屏候选"，绝不能当成"粘贴选中记录"
+        if (e.Key == Key.ImeProcessed && _searchBox.IsKeyboardFocusWithin) return;
+
         switch (key)
         {
             case Key.Escape:
@@ -1701,6 +1918,11 @@ internal sealed class ClipboardPanel : Window
                 if (_favoritePopup is not null)
                 {
                     CloseFavoritePopup();
+                }
+                else if (HasSearchText)
+                {
+                    // 搜索框里有内容：第一下 Esc 只清空搜索并把焦点还给面板（面板不关）
+                    ClearSearchAndUnfocus();
                 }
                 else
                 {
@@ -1734,6 +1956,10 @@ internal sealed class ClipboardPanel : Window
                 break;
 
             case Key.Delete:
+                // 在搜索框里改文字时 Delete 是删字符，不能误删剪贴记录
+                // （搜索框为空时 Delete 本来也没字可删，保持原来的"删除选中记录"行为）
+                if (_searchBox.IsKeyboardFocusWithin && _searchBox.Text.Length > 0) break;
+
                 if (SelectedItem is { } target) DeleteRequested?.Invoke(target);
                 e.Handled = true;
                 break;
@@ -2202,9 +2428,12 @@ internal sealed class ClipboardPanel : Window
         int limit = App.Settings.ClipboardMaxItems;
         string limitText = limit <= 0 ? "不限" : $"{limit} 条";
 
+        // 搜索时把"命中条数"放最前面：用户一眼能看出过滤掉了多少
+        string matched = HasSearchText ? $"匹配 {showing} 条 · " : string.Empty;
+
         _status.Text = _showFavorites
-            ? $"收藏 {showing} 条 · 库内共 {total} 条（含收藏 {favorites} 条） · 占用 {ClipItem.FormatSize(_store.TotalBytes)}"
-            : $"共 {total} 条（收藏 {favorites} 条） · 占用 {ClipItem.FormatSize(_store.TotalBytes)} · 上限 {limitText}";
+            ? matched + $"收藏 {showing} 条 · 库内共 {total} 条（含收藏 {favorites} 条） · 占用 {ClipItem.FormatSize(_store.TotalBytes)}"
+            : matched + $"共 {total} 条（收藏 {favorites} 条） · 占用 {ClipItem.FormatSize(_store.TotalBytes)} · 上限 {limitText}";
     }
 
     // ---------- 配色 ----------
@@ -2241,6 +2470,9 @@ internal sealed class ClipboardPanel : Window
         _panel.Background = _panelBrush;
         _panel.BorderBrush = _lineBrush;
         _status.Foreground = _mutedBrush;
+
+        // 搜索框也用同一套主题色
+        ApplySearchTone();
 
         // 圆角与投影也照搬悬浮栏那套参数，两个窗口放一起才像一套
         _panel.CornerRadius = new CornerRadius(palette.CornerRadius);

@@ -54,6 +54,13 @@ public interface IWindowHost : IDisposable
     void SetTakeover(bool enabled);
 
     /// <summary>
+    /// 是否接管文件资源管理器窗口（默认接管，可在「接管指定程序…」里取消）。
+    ///
+    /// 判定发生在宿主侧（枚举窗口与摘按钮是宿主的活），设置改了要推过去。
+    /// </summary>
+    void SetExplorerTakeover(bool enabled);
+
+    /// <summary>
     /// 接管范围：多窗口程序是否自动接管，以及手动指定要接管的程序名单。
     ///
     /// 这两条判定都在宿主侧做（枚举窗口是宿主的活），所以设置变了要推过去。

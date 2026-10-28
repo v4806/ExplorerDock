@@ -93,6 +93,9 @@ internal sealed class HostMessage
     /// <summary>「多窗口程序自动接管」开关。</summary>
     public bool AutoTakeover { get; set; }
 
+    /// <summary>「接管文件资源管理器」开关（issue #11）。</summary>
+    public bool TakeoverExplorer { get; set; } = true;
+
     /// <summary>手动指定要接管的程序名（小写、不带扩展名）。</summary>
     public List<string>? Processes { get; set; }
 
@@ -115,6 +118,9 @@ internal static class HostProtocol
 
     public const string CmdStart = "start";
     public const string CmdTakeover = "takeover";
+
+    /// <summary>界面 → 功能进程：是否接管文件资源管理器窗口（默认接管，可单独取消）。</summary>
+    public const string CmdExplorerTakeover = "explorer_takeover";
     public const string CmdReapply = "reapply";
     public const string CmdRestoreAll = "restore_all";
     public const string CmdActivate = "activate";

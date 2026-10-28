@@ -161,9 +161,39 @@ internal sealed class HostKeyboard : IDisposable
         }
     }
 
+    /// <summary>
+    /// Win 键在物理上是不是按着（以键盘驱动状态为准，不看我们缓存的 <see cref="_winDown"/>）。
+    ///
+    /// 缓存状态会因为抬起的按键事件丢失而卡住 —— 钩子每 20 秒重挂一次有空档、UAC/锁屏
+    /// 切换、别的程序抢键都会丢事件。缓存一旦停在"Win 按着"，之后普通打字按到 V
+    /// 就会被当成 Win+V 弹出剪贴板面板（issue #10 的误触发），所以判定前用物理状态校正。
+    /// </summary>
+    private static bool IsWinPhysicallyDown()
+    {
+        try
+        {
+            return NativeMethods.IsKeyDown(VK_LWIN) || NativeMethods.IsKeyDown(VK_RWIN);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private bool HandleClipboard(KeyStroke stroke)
     {
         if (!_clipboardTakeover) return false;
+
+        // 状态自愈：抬起事件丢了就把缓存修回来。每次按键只多两次 GetAsyncKeyState
+        //（微秒级），不会拖慢钩子回调。注入的按键在自动化验证时物理状态不可信，跳过。
+        if (!stroke.Injected)
+        {
+            if (_winDown && !IsWinPhysicallyDown()) _winDown = false;
+
+            // V 的抬起事件丢了：之后还能收到别的按键，说明 V 早就松开了。
+            // 不修的话 _vSwallowed 会一直卡着，此后每次按 V 都被吞掉、V 键等于失灵。
+            if (_vSwallowed && stroke.Vk != VK_V) _vSwallowed = false;
+        }
 
         switch (stroke.Vk)
         {
@@ -171,6 +201,10 @@ internal sealed class HostKeyboard : IDisposable
             case VK_RWIN:
                 if (stroke.Down)
                 {
+                    // 新的一次 Win 按下：上一轮可能因为抬起丢失而没走完。
+                    // 先把遗留标记作废，否则这次 Win 抬起会被吞、开始菜单弹不出来。
+                    _swallowWinUp = false;
+                    _vSwallowed = false;
                     _winDown = true;
                     return false;   // Win 键本身放行：开始菜单、其它 Win 组合键都不该受影响
                 }
@@ -194,7 +228,18 @@ internal sealed class HostKeyboard : IDisposable
                     // 一旦放行，系统就看到了 V，会把它自己那个剪贴板面板也弹出来。
                     if (_vSwallowed) return true;
 
-                    if (!_winDown) return false;
+                    // 以物理键盘为准：缓存说 Win 按着、实际没按 → 状态是脏的。
+                    // 复位缓存并把 V 原样放行，用户该打字的照常打字（issue #10）。
+                    // 注入事件（自动化验证）没有可信的物理状态，只能退回缓存判断。
+                    if (stroke.Injected)
+                    {
+                        if (!_winDown) return false;
+                    }
+                    else if (!IsWinPhysicallyDown())
+                    {
+                        _winDown = false;
+                        return false;
+                    }
 
                     // 只有"纯 Win+V"归我们，Ctrl/Alt/Shift 掺进来的组合照旧给系统
                     if (NativeMethods.IsKeyDown(VK_CONTROL)

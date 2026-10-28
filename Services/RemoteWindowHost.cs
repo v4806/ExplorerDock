@@ -123,11 +123,19 @@ internal sealed class RemoteWindowHost : IWindowHost
 
     public void Start()
     {
-        Request(new HostMessage { Cmd = HostProtocol.CmdStart, Enabled = App.Settings.TakeoverEnabled });
+        Request(new HostMessage
+        {
+            Cmd = HostProtocol.CmdStart,
+            Enabled = App.Settings.TakeoverEnabled,
+            TakeoverExplorer = App.Settings.TakeoverExplorer,
+        });
     }
 
     public void SetTakeover(bool enabled)
         => Request(new HostMessage { Cmd = HostProtocol.CmdTakeover, Enabled = enabled });
+
+    public void SetExplorerTakeover(bool enabled)
+        => Request(new HostMessage { Cmd = HostProtocol.CmdExplorerTakeover, Enabled = enabled });
 
     public void SetTakeoverScope(bool autoMultiWindow, IReadOnlyList<string> processes)
     {

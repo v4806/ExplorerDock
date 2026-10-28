@@ -49,6 +49,18 @@ internal sealed class AltTabOverlay : Window
     /// 不放它过去的话，选中项会被光标底下的那张卡抢走。
     /// </summary>
     private bool _cursorArmed;
+
+    /// <summary>
+    /// 鼠标悬停是否直接改变选中项（issue #8）。
+    ///
+    /// 默认关：面板弹出时光标常常停在屏幕中间，压到某张卡就会把键盘选择抢走。
+    /// 关掉后只有"点一下卡片"才切换 —— 悬停不再改变选中，但点击照旧有效。
+    /// </summary>
+    private bool _mouseHoverSelect;
+
+    /// <summary>设置项变化时立即生效（下一次弹出或面板开着时都能用）。</summary>
+    public void ApplyMouseHoverSelect(bool enabled) => _mouseHoverSelect = enabled;
+
     private Brush _cardNormal = Brushes.Transparent;
     private Brush _cardSelected = Brushes.Transparent;
     private Brush _selectedBorderBrush = Brushes.Transparent;
@@ -552,9 +564,13 @@ internal sealed class AltTabOverlay : Window
         };
 
         // 用 MouseMove 而不是 MouseEnter，并且只认"真的动过"的那次：
-        // 面板刚弹出来时鼠标往往正好压在某张卡上，直接认了就会把用户的键盘选择打乱
+        // 面板刚弹出来时鼠标往往正好压在某张卡上，直接认了就会把用户的键盘选择打乱。
+        // 另外默认关掉"悬停即选中"（issue #8）：面板弹出时光标停在哪张卡上都不影响键盘选择，
+        // 只有明确点一下才会切换。
         root.MouseMove += (_, _) =>
         {
+            if (!_mouseHoverSelect) return;
+
             if (!_cursorArmed)
             {
                 _cursorArmed = true;

@@ -212,6 +212,9 @@
             <Setter Property="FontFamily" Value="Microsoft YaHei UI, Segoe UI" />
             <Setter Property="FontSize" Value="12.5" />
             <Setter Property="SnapsToDevicePixels" Value="True" />
+            <!-- 小字号在 125%/150% 缩放下用 Display 排版模式，笔画更实、不发虚 -->
+            <Setter Property="TextOptions.TextFormattingMode" Value="Display" />
+            <Setter Property="TextOptions.TextRenderingMode" Value="ClearType" />
             <Setter Property="MinWidth" Value="196" />
             <Setter Property="Template">
                 <Setter.Value>
@@ -238,6 +241,8 @@
             <Setter Property="FontFamily" Value="Microsoft YaHei UI, Segoe UI" />
             <Setter Property="FontSize" Value="12.5" />
             <Setter Property="SnapsToDevicePixels" Value="True" />
+            <Setter Property="TextOptions.TextFormattingMode" Value="Display" />
+            <Setter Property="TextOptions.TextRenderingMode" Value="ClearType" />
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="{x:Type MenuItem}">

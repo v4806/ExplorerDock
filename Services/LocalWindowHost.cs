@@ -14,13 +14,15 @@ internal sealed class LocalWindowHost : IWindowHost
     private readonly ExplorerWatcher _watcher = new();
     private readonly HostKeyboard _keyboard;
 
-    public LocalWindowHost(bool takeoverEnabled = true)
+    public LocalWindowHost(bool takeoverEnabled = true, bool takeoverExplorer = true)
     {
         // 接管范围（自动接管开关 + 手动名单）由宿主侧判定：本地实现就是本进程
         TakeoverState.SetScope(App.Settings.AutoTakeoverMultiWindow, App.Settings.TakeoverProcesses);
         TakeoverState.SetGroupMode(App.Settings.AltTabGroupScope);
+        TakeoverState.SetExplorerTakeover(takeoverExplorer);
 
         _watcher.TakeoverEnabled = takeoverEnabled;
+        _watcher.TakeoverExplorer = takeoverExplorer;
         _watcher.SnapshotUpdated += snapshot => SnapshotUpdated?.Invoke(snapshot);
 
         _keyboard = new HostKeyboard(action => KeyAction?.Invoke(action));
@@ -47,6 +49,15 @@ internal sealed class LocalWindowHost : IWindowHost
 
         if (enabled) _watcher.ReapplyNow();
         else _watcher.RestoreNow();
+    }
+
+    public void SetExplorerTakeover(bool enabled)
+    {
+        _watcher.TakeoverExplorer = enabled;
+        TakeoverState.SetExplorerTakeover(enabled);
+
+        // 立刻重算一轮：还回/摘掉任务栏按钮、悬浮栏与 Alt+Tab 的合并判定一起跟上
+        _watcher.ReapplyNow();
     }
 
     public void ReapplyNow() => _watcher.ReapplyNow();

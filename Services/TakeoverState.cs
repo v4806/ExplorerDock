@@ -10,15 +10,27 @@ namespace ExplorerDock.Services;
 ///
 /// 它跑在功能进程（<c>--host</c>）里；未拆进程时跑在界面进程里。
 /// 读取方可能来自别的线程，所以整份快照用 volatile 引用发布、内部集合建好之后不再修改。
+///
+/// 另外还存一份「当前虚拟桌面上的窗口」快照（<see cref="PublishCurrentDesktop"/>）：
+/// 悬浮栏按钮与 Alt+Tab 候选都只显示当前桌面的窗口，判定统一查它，不各自去调 COM。
 /// </summary>
 internal static class TakeoverState
 {
     /// <summary>当前处于接管范围内的窗口句柄。</summary>
     private static volatile HashSet<IntPtr> _handles = new();
 
+    /// <summary>
+    /// 当前虚拟桌面上的窗口句柄（由监视线程每轮用 IVirtualDesktopManager 过滤后发布）。
+    /// null = 还没有快照：查询一律返回 true（不过滤），保持这个功能加进来之前的行为。
+    /// </summary>
+    private static volatile HashSet<IntPtr>? _currentDesktop;
+
     private static volatile bool _autoMultiWindow;
     private static volatile string[] _manual = Array.Empty<string>();
     private static volatile AltTabGroupMode _groupMode = AltTabGroupMode.TakeoverOnly;
+
+    /// <summary>是否接管文件资源管理器窗口（默认开；「接管指定程序…」里可以取消，issue #11）。</summary>
+    private static volatile bool _explorerTakeover = true;
 
     /// <summary>自动接管：同名程序窗口达到这个数就接管。</summary>
     public const int AutoTakeoverThreshold = 2;
@@ -45,6 +57,28 @@ internal static class TakeoverState
 
     /// <summary>监视线程发布本轮结果。</summary>
     public static void Publish(IEnumerable<IntPtr> handles) => _handles = new HashSet<IntPtr>(handles);
+
+    /// <summary>
+    /// 监视线程发布"当前虚拟桌面上的窗口"快照。
+    ///
+    /// 悬浮栏按钮列表与 Alt+Tab 候选都按它过滤：别的桌面上的窗口仍然被接管（任务栏按钮照摘），
+    /// 但不应显示在当前桌面的悬浮栏 / Alt+Tab 里。集合建好之后不再修改，随便哪个线程读都安全。
+    /// </summary>
+    public static void PublishCurrentDesktop(IEnumerable<IntPtr> handles)
+        => _currentDesktop = new HashSet<IntPtr>(handles);
+
+    /// <summary>
+    /// 这个窗口在不在当前虚拟桌面上（悬浮栏按钮列表、Alt+Tab 候选的过滤判据）。
+    ///
+    /// 还没有快照（监视线程没跑起来、刚启动或 COM 不可用）时返回 true：
+    /// 宁可多显示几个窗口，也不能因为拿不到桌面信息就一个窗口都不显示。
+    /// </summary>
+    public static bool IsOnCurrentDesktop(IntPtr hwnd)
+    {
+        var snapshot = _currentDesktop;
+
+        return snapshot is null || snapshot.Contains(hwnd);
+    }
 
     /// <summary>设置里两个开关/名单变化时更新（由界面进程推过来，或启动时从 settings.json 读）。</summary>
     public static void SetScope(bool autoMultiWindow, IEnumerable<string>? processes)
@@ -81,11 +115,14 @@ internal static class TakeoverState
     /// <summary>
     /// 这个窗口是不是"被接管的"（Alt+Tab 的同名进程打包、Alt+~ 的放行判断都问它）。
     ///
-    /// 资源管理器窗口类直接算接管（它本来就是默认接管的对象，不受两个新开关影响）；
-    /// 其余按监视线程发布的窗口集合判定。
+    /// 资源管理器窗口类只有在 <see cref="_explorerTakeover"/> 开着时才算接管（默认开，
+    /// 可在「接管指定程序…」里取消，issue #11）；其余按监视线程发布的窗口集合判定。
     /// </summary>
     public static bool IsTakeoverWindow(IntPtr hwnd, string className)
-        => ExplorerWatcher.IsTakeoverWindowClass(className) || _handles.Contains(hwnd);
+        => (_explorerTakeover && ExplorerWatcher.IsTakeoverWindowClass(className)) || _handles.Contains(hwnd);
+
+    /// <summary>是否接管文件资源管理器窗口（默认 true，界面进程推过来）。</summary>
+    public static void SetExplorerTakeover(bool enabled) => _explorerTakeover = enabled;
 
     /// <summary>把 "C:\…\chrome.exe" / "Chrome.EXE" / "chrome" 一律归一成小写的 "chrome"。</summary>
     public static string Normalize(string? process)

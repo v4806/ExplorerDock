@@ -84,6 +84,15 @@ public sealed class Settings
     public bool TakeoverEnabled { get; set; } = true;
 
     /// <summary>
+    /// 是否接管文件资源管理器窗口（issue #11 诉求 2）。
+    ///
+    /// 默认接管；在「接管指定程序…」窗口里取消勾选可以单独排除资源管理器：
+    /// 任务栏按钮还回去、悬浮栏不再显示文件夹窗口、Alt+Tab 也不再合并它们。
+    /// 总开关 <see cref="TakeoverEnabled"/> 仍然管全部接管。
+    /// </summary>
+    public bool TakeoverExplorer { get; set; } = true;
+
+    /// <summary>
     /// 多窗口程序自动接管：桌面上某个程序（按 exe 名判定）的可见窗口达到 2 个及以上时，
     /// 自动把这些窗口的按钮从任务栏移到悬浮栏。默认关，避免升级后任务栏突然少一堆按钮。
     /// </summary>
@@ -116,6 +125,14 @@ public sealed class Settings
     /// 悬浮栏接管谁，谁才参与打包。
     /// </summary>
     public AltTabGroupMode AltTabGroupScope { get; set; } = AltTabGroupMode.TakeoverOnly;
+
+    /// <summary>
+    /// Alt+Tab 面板里鼠标悬停是否直接改变选中项。
+    ///
+    /// 默认 **关**（issue #8：鼠标停在屏幕中间时，面板一弹出就容易因为光标压在某张卡上
+    /// 而把键盘选择打乱）。关掉后鼠标仍然可以点击卡片切换，只是悬停不再抢键盘选中。
+    /// </summary>
+    public bool AltTabMouseHoverSelect { get; set; }
 
     /// <summary>是否显示悬浮栏。</summary>
     public bool ShowDock { get; set; } = true;
@@ -170,6 +187,16 @@ public sealed class Settings
     public bool SetupCompleted { get; set; }
 
     // ---------- 剪贴板（Win+V） ----------
+
+    /// <summary>
+    /// 剪贴板历史功能总开关（issue #11）。
+    ///
+    /// 关掉后不再监听剪贴板变化、不响应 Win+V、不在内存里保留历史记录 ——
+    /// 给完全不用这个功能的用户一个"零占用"的选项。
+    /// 与 <see cref="ClipboardTakeover"/> 的区别：那个只管 Win+V 热键接管，
+    /// 关掉后剪贴板照旧在后台采集；这个开关连采集一起停。
+    /// </summary>
+    public bool ClipboardEnabled { get; set; } = true;
 
     /// <summary>是否接管 Win+V：用本软件的面板替换系统剪贴板历史。</summary>
     public bool ClipboardTakeover { get; set; } = true;

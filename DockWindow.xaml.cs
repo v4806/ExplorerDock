@@ -3188,8 +3188,12 @@ public partial class DockWindow : Window
                 Topmost = true,
                 Width = 1,
                 Height = 1,
-                Left = -32000,
-                Top = -32000,
+                // 先建在屏幕内：建在 (-32000,-32000) 这种屏幕外位置时，WPF 给窗口的
+                // 初始 DPI 会退成 96，之后弹出的菜单按错误 DPI 渲染、被 DWM 放大 ——
+                // 表现就是"一级菜单比二级菜单大一号还发虚"（二级菜单在正确的 DPI 上下文里）。
+                // 反正紧接着就会 SetWindowPos 到光标位置，这里只是给窗口一个正常的出生点。
+                Left = 0,
+                Top = 0,
                 Title = "ExplorerDock",
             };
 
@@ -3224,6 +3228,7 @@ public partial class DockWindow : Window
         menu.Items.Add(MenuGroup(
             "接管窗口",
             CheckItem("接管任务栏按钮", App.Settings.TakeoverEnabled, Host.SetTakeover),
+            CheckItem("接管文件资源管理器", App.Settings.TakeoverExplorer, Host.SetExplorerTakeover),
             CheckItem("自动接管多窗口程序", App.Settings.AutoTakeoverMultiWindow, Host.SetAutoTakeoverMultiWindow),
             MenuAction("接管指定程序…", Host.OpenProcessPicker)));
 
@@ -3251,6 +3256,7 @@ public partial class DockWindow : Window
             "Alt+Tab 切换",
             CheckItem("接管 Alt+Tab 切换", App.Settings.AltTabTakeover, Host.SetAltTabTakeover),
             CheckItem("全屏应用时让系统处理 Alt+Tab", App.Settings.AltTabFullscreenPassthrough, Host.SetAltTabFullscreenPassthrough),
+            CheckItem("鼠标悬停切换选中", App.Settings.AltTabMouseHoverSelect, Host.SetAltTabMouseHoverSelect),
             MenuSeparator(),
             groupNone,
             groupTakeover,
@@ -3267,6 +3273,7 @@ public partial class DockWindow : Window
 
         menu.Items.Add(MenuGroup(
             "剪贴板（Win+V）",
+            CheckItem("启用剪贴板历史", App.Settings.ClipboardEnabled, Host.SetClipboardEnabled),
             CheckItem("接管 Win+V 剪贴板", App.Settings.ClipboardTakeover, Host.SetClipboardTakeover),
             MenuAction("打开剪贴板历史", Host.ToggleClipboardPanel),
             MenuAction("剪贴板设置…", Host.OpenClipboardSettings),

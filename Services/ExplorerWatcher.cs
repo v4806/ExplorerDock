@@ -83,6 +83,9 @@ public sealed class ExplorerWatcher : IDisposable
     /// <summary>上一轮发布出去的接管窗口集合，用来判断要不要重新发布。</summary>
     private readonly HashSet<IntPtr> _published = new();
 
+    /// <summary>上一轮发布出去的"当前虚拟桌面窗口"集合，用来判断桌面切换后要不要通知界面刷新。</summary>
+    private readonly HashSet<IntPtr> _desktopHandles = new();
+
     /// <summary>
     /// 悬浮栏上的按钮列表。多标签资源管理器窗口是**一个标签页一项**，
     /// 其他程序是**一个窗口一项**。
@@ -111,6 +114,14 @@ public sealed class ExplorerWatcher : IDisposable
 
     public bool TakeoverEnabled { get; set; } = true;
 
+    /// <summary>
+    /// 是否接管文件资源管理器窗口（默认接管，可在「接管指定程序…」里取消勾选，issue #11）。
+    ///
+    /// 关掉后资源管理器窗口的任务栏按钮会还回去，悬浮栏不显示、Alt+Tab 也不再合并它们；
+    /// 其他被手动指定 / 自动接管的程序不受影响。总开关 <see cref="TakeoverEnabled"/> 仍然管全部。
+    /// </summary>
+    public bool TakeoverExplorer { get; set; } = true;
+
     public void Start()
     {
         _thread.Start();
@@ -135,12 +146,15 @@ public sealed class ExplorerWatcher : IDisposable
                 var byHandle = new Dictionary<IntPtr, WindowCandidate>(candidates.Count);
                 foreach (var candidate in candidates) byHandle[candidate.Handle] = candidate;
 
-                // 2) 自动接管的程序集合（按程序名判定，带取消滞后）
+                // 2) 当前虚拟桌面快照：悬浮栏按钮与 Alt+Tab 候选都只保留当前桌面的窗口。
+                //    任务栏摘除**不**看它 —— 别的桌面上的窗口按钮同样要摘，切过去不能又冒出来。
+                //    桌面切换时窗口清单可能一点都不变，所以这一步自身也算一次"变化"。
+                bool changed = PublishDesktopSnapshot(candidates);
+
+                // 3) 自动接管的程序集合（按程序名判定，带取消滞后）
                 UpdateAutoHeld(candidates);
 
-                // 3) 窗口清单：关掉的删掉，新出现的追加（顺序即悬浮栏的顺序）
-                bool changed = false;
-
+                // 4) 窗口清单：关掉的删掉，新出现的追加（顺序即悬浮栏的顺序）
                 for (int i = _windows.Count - 1; i >= 0; i--)
                 {
                     if (byHandle.ContainsKey(_windows[i])) continue;
@@ -159,7 +173,7 @@ public sealed class ExplorerWatcher : IDisposable
                     changed = true;
                 }
 
-                // 4) 本轮接管范围
+                // 5) 本轮接管范围（**包含其他虚拟桌面的窗口**，任务栏按钮照摘）
                 var scope = new List<IntPtr>(_windows.Count);
 
                 foreach (var handle in _windows)
@@ -170,7 +184,7 @@ public sealed class ExplorerWatcher : IDisposable
                 SyncTaskbar(scope);
                 PublishScope(scope);
 
-                // 5) 重建按钮列表（多标签窗口在这里展开成一个标签页一项）
+                // 6) 重建按钮列表（多标签窗口在这里展开成一个标签页一项；只列当前桌面的窗口）
                 if (RebuildItems(scope, byHandle, locations)) changed = true;
 
                 var foreground = NativeMethods.GetForegroundWindow();
@@ -212,7 +226,8 @@ public sealed class ExplorerWatcher : IDisposable
     /// </summary>
     private bool ShouldTakeOver(WindowCandidate candidate)
     {
-        if (IsTakeoverWindowClass(candidate.ClassName)) return true;
+        // 文件资源管理器：默认接管，但可以在「接管指定程序…」里单独取消（issue #11）
+        if (IsTakeoverWindowClass(candidate.ClassName)) return TakeoverExplorer;
         if (TakeoverState.IsManual(candidate.ProcessName)) return true;
 
         return TakeoverState.AutoMultiWindow && _autoHeld.Contains(candidate.ProcessName);
@@ -411,6 +426,58 @@ public sealed class ExplorerWatcher : IDisposable
     }
 
     /// <summary>
+    /// 计算并发布"当前虚拟桌面上的候选窗口"快照。返回 true 表示集合变了 ——
+    /// 悬浮栏与 Alt+Tab 都要靠它判断要不要刷新：切换虚拟桌面时窗口清单本身可能一点都不变，
+    /// 只有这份快照能告诉我们"该换一批窗口显示了"。
+    ///
+    /// 只统计候选窗口（见 <see cref="TryDescribeWindow"/>）：悬浮栏按钮和 Alt+Tab 候选都来自这里。
+    /// 任务栏摘除**不**按这份快照来：scope 仍然包含所有桌面的窗口，否则切到别的桌面时
+    /// 被摘掉的按钮会重新冒出来（issue #9 只要求"显示"按桌面分，不要求放弃接管）。
+    ///
+    /// COM 失败时 <see cref="VirtualDesktop.IsOnCurrentDesktop"/> 一律返回 true，
+    /// 整份快照退化成"全部候选" —— 也就是这个功能加进来之前的行为，不会丢窗口。
+    /// </summary>
+    private bool PublishDesktopSnapshot(List<WindowCandidate> candidates)
+    {
+        var current = new List<IntPtr>(candidates.Count);
+
+        foreach (var candidate in candidates)
+        {
+            try
+            {
+                if (VirtualDesktop.IsOnCurrentDesktop(candidate.Handle)) current.Add(candidate.Handle);
+            }
+            catch
+            {
+                // VirtualDesktop 内部已经兜底，这里再兜一层：真抛了也按"在当前桌面"算
+                current.Add(candidate.Handle);
+            }
+        }
+
+        // 每轮都发布一份新快照：读取方永远拿到本轮结果，不会读到半更新的集合
+        TakeoverState.PublishCurrentDesktop(current);
+
+        bool changed = current.Count != _desktopHandles.Count;
+
+        if (!changed)
+        {
+            foreach (var handle in current)
+            {
+                if (_desktopHandles.Contains(handle)) continue;
+                changed = true;
+                break;
+            }
+        }
+
+        if (!changed) return false;
+
+        _desktopHandles.Clear();
+        foreach (var handle in current) _desktopHandles.Add(handle);
+
+        return true;
+    }
+
+    /// <summary>
     /// 重建悬浮栏按钮列表。顺序：资源管理器窗口在前（按打开顺序、多标签展开），
     /// 其他程序按"该程序第一个窗口出现的顺序"分组，组内按窗口出现顺序 ——
     /// 悬浮栏按这个顺序分行，每个程序独占一行。
@@ -422,6 +489,9 @@ public sealed class ExplorerWatcher : IDisposable
         // 1) 资源管理器：整窗一项 / 多标签展开成一标签页一项
         foreach (var handle in scope)
         {
+            // 只列当前虚拟桌面的窗口：别的桌面上的窗口仍然被接管（任务栏按钮照摘），只是不显示在悬浮栏上
+            if (!TakeoverState.IsOnCurrentDesktop(handle)) continue;
+
             if (byHandle.TryGetValue(handle, out var candidate) && IsTakeoverWindowClass(candidate.ClassName))
             {
                 AppendExplorerItems(list, handle, locations);
@@ -434,6 +504,7 @@ public sealed class ExplorerWatcher : IDisposable
 
         foreach (var handle in scope)
         {
+            if (!TakeoverState.IsOnCurrentDesktop(handle)) continue;
             if (!byHandle.TryGetValue(handle, out var candidate)) continue;
             if (IsTakeoverWindowClass(candidate.ClassName)) continue;
 
@@ -447,6 +518,7 @@ public sealed class ExplorerWatcher : IDisposable
         {
             foreach (var handle in scope)
             {
+                if (!TakeoverState.IsOnCurrentDesktop(handle)) continue;
                 if (!byHandle.TryGetValue(handle, out var candidate)) continue;
                 if (IsTakeoverWindowClass(candidate.ClassName)) continue;
                 if (!string.Equals(candidate.ProcessName, process, StringComparison.OrdinalIgnoreCase)) continue;

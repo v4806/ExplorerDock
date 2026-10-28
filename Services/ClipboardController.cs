@@ -87,6 +87,7 @@ internal sealed class ClipboardController : IDisposable
     private void OnKeyAction(string action)
     {
         if (action != HostProtocol.KeyToggleClipboard) return;
+        if (!App.Settings.ClipboardEnabled) return;
         if (!App.Settings.ClipboardTakeover) return;
 
         Post(Toggle);

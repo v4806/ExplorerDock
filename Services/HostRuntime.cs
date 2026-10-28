@@ -50,6 +50,7 @@ internal sealed class HostRuntime : IDisposable
         // 接管范围先按主进程的设置初始化一次（之后界面侧改了会再推过来）
         TakeoverState.SetScope(App.Settings.AutoTakeoverMultiWindow, App.Settings.TakeoverProcesses);
         TakeoverState.SetGroupMode(App.Settings.AltTabGroupScope);
+        TakeoverState.SetExplorerTakeover(App.Settings.TakeoverExplorer);
 
         if (App.Settings.TakeoverEnabled) _host.SetTakeover(true);
         _host.Start();
@@ -368,10 +369,17 @@ internal sealed class HostRuntime : IDisposable
             {
                 case HostProtocol.CmdStart:
                     _host.SetTakeover(message.Enabled);
+                    _host.SetExplorerTakeover(message.TakeoverExplorer);
                     break;
 
                 case HostProtocol.CmdTakeover:
                     _host.SetTakeover(message.Enabled);
+                    break;
+
+                case HostProtocol.CmdExplorerTakeover:
+                    // 是否接管文件资源管理器窗口（默认接管，可在「接管指定程序…」里取消）
+                    _host.SetExplorerTakeover(message.Enabled);
+                    message.Ok = true;
                     break;
 
                 case HostProtocol.CmdTakeoverScope:
