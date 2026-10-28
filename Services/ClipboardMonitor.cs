@@ -94,36 +94,57 @@ internal sealed class ClipboardMonitor : IDisposable
     /// <summary>后台采集线程：读剪贴板，读完把结果丢回 UI 线程入库。</summary>
     private void CaptureLoop()
     {
-        while (true)
+        try
         {
-            if (!_captureSignal.WaitOne(250))
+            while (true)
             {
+                if (!_captureSignal.WaitOne(250))
+                {
+                    if (!_running) return;
+                    continue;
+                }
+
                 if (!_running) return;
-                continue;
+
+                string formats = string.Empty;
+                ClipboardPayload? payload = null;
+
+                try
+                {
+                    formats = ClipboardInterop.DescribeFormats();
+                    payload = ClipboardInterop.Read();
+                }
+                catch
+                {
+                    // 读失败就当这次没内容
+                }
+
+                // 读取可能很慢（网页 HTML 的延迟渲染能到几秒）：回来时程序可能已经关掉剪贴板
+                // 功能，采集线程、库、面板都释放了。这时绝不能再往 UI 线程投结果。
+                if (!_running || _disposed) return;
+
+                try
+                {
+                    _dispatcher.BeginInvoke(new Action(() => Commit(payload, formats)));
+                }
+                catch
+                {
+                    return;   // 程序在退出
+                }
             }
-
-            if (!_running) return;
-
-            string formats = string.Empty;
-            ClipboardPayload? payload = null;
-
+        }
+        finally
+        {
+            // 信号量由采集线程自己释放：Dispose 里的 Join 可能超时（读取卡住），
+            // 若 Dispose 超时后强行释放，本线程稍后醒来再 WaitOne 会抛 ObjectDisposedException ——
+            // 那是后台线程的未处理异常，会直接把整个进程杀掉。
             try
             {
-                formats = ClipboardInterop.DescribeFormats();
-                payload = ClipboardInterop.Read();
+                _captureSignal.Dispose();
             }
             catch
             {
-                // 读失败就当这次没内容
-            }
-
-            try
-            {
-                _dispatcher.BeginInvoke(new Action(() => Commit(payload, formats)));
-            }
-            catch
-            {
-                return;   // 程序在退出
+                // 忽略
             }
         }
     }
@@ -224,9 +245,11 @@ internal sealed class ClipboardMonitor : IDisposable
 
         try
         {
+            // 只唤醒、不释放信号量：信号量归采集线程在退出时释放。
+            // Join 超时（读取卡在延迟渲染的格式上）也不会出现"释放后又被 WaitOne"的竞态，
+            // 读完之后线程自己看到 _running=false 就会退出并收尾。
             _captureSignal.Set();
-            _captureThread.Join(500);
-            _captureSignal.Dispose();
+            _captureThread.Join(1500);
         }
         catch
         {

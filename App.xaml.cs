@@ -691,8 +691,9 @@ public partial class App : Application
         {
             _windowHost?.SetKeyState(
                 Settings.AltTabTakeover,
-                // 总开关关着时 Win+V 一律交还系统，哪怕"接管 Win+V"这一项还勾着
-                Settings.ClipboardTakeover && Settings.ClipboardEnabled,
+                // 总开关关着、或剪贴板没真正起来时，Win+V 一律交还系统，
+                // 哪怕"接管 Win+V"这一项还勾着
+                Settings.ClipboardTakeover && Settings.ClipboardEnabled && _clipboard is not null,
                 _altTab?.PanelBusy == true);
         }
         catch
@@ -1313,6 +1314,14 @@ public partial class App : Application
         if (enabled)
         {
             StartClipboard();
+
+            // 启动失败（StartClipboard 里已经提示过用户）就把总开关改回关闭，
+            // 别让设置里显示"开着"、实际 Win+V 却没反应
+            if (!_clipboardStarted)
+            {
+                Settings.ClipboardEnabled = false;
+                Settings.Save();
+            }
         }
         else
         {
@@ -1361,12 +1370,11 @@ public partial class App : Application
 
     /// <summary>
     /// 启动剪贴板历史：解密载入历史 → 开始监听剪贴板变化 → 接上 Win+V 接管。
-    /// 总开关关闭时不调用；重复调用无副作用。
+    /// 总开关关闭时不调用；重复调用无副作用。只有全部初始化成功才算启动成功。
     /// </summary>
     private void StartClipboard()
     {
         if (_clipboardStarted) return;
-        _clipboardStarted = true;
 
         try
         {
@@ -1380,11 +1388,52 @@ public partial class App : Application
                 _clipboard = new ClipboardController(this, store);
                 _clipboard.Start();
             }
+
+            // 全部成功才置位：失败时保持 false，调用方会把总开关改回关闭
+            _clipboardStarted = true;
+
+            // 启动早期 _altTab.Start() 推过一次状态（那时 _clipboard 还是 null，Win+V 没接管）；
+            // 这里成功后补推一次，Win+V 才会交给我们的面板
+            PushKeyState();
         }
         catch (Exception ex)
         {
-            // 剪贴板起不来不影响主功能，但要让用户知道这次没起来
+            // 失败时把半成品都清掉，别留下一半的监听线程/面板；同时 Win+V 保持交还系统
+            try
+            {
+                _clipboard?.Dispose();
+            }
+            catch
+            {
+                // 忽略
+            }
+
+            _clipboard = null;
+
+            try
+            {
+                _clipMonitor?.Dispose();
+            }
+            catch
+            {
+                // 忽略
+            }
+
+            _clipMonitor = null;
+
+            try
+            {
+                _clipStore?.Dispose();
+            }
+            catch
+            {
+                // 忽略
+            }
+
+            _clipStore = null;
             _clipboardStarted = false;
+
+            // 剪贴板起不来不影响主功能，但要让用户知道这次没起来
             Views.ConfirmDialog.Notify("剪贴板初始化失败", $"{ex.GetType().Name}: {ex.Message}");
         }
     }

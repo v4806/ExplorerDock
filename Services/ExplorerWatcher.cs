@@ -712,10 +712,19 @@ public sealed class ExplorerWatcher : IDisposable
             return false;
         }
 
-        // UWP 的"隐身窗口"：IsWindowVisible 说可见，其实被 DWM 藏着
-        if (NativeMethods.IsCloaked(hwnd)) return false;
+        // DWM cloak 分两类，处理方式不同：
+        //   · 应用自己藏起来（DWM_CLOAKED_APP / INHERITED）的"隐身窗口" —— 排除；
+        //   · shell cloak（DWM_CLOAKED_SHELL）主要是**虚拟桌面切换**把非当前桌面的窗口藏起来。
+        //     这类窗口仍然要接管：否则切到那个桌面时任务栏按钮会重新冒出来，自动接管计数也会漏。
+        //     悬浮栏 / Alt+Tab 的"只显示当前桌面"过滤在显示层单独做（查 VirtualDesktop 快照）。
+        int cloak = NativeMethods.GetCloakValue(hwnd);
+        if ((cloak & ~NativeMethods.DWM_CLOAKED_SHELL) != 0) return false;
 
         var className = NativeMethods.GetClassNameSafe(hwnd);
+
+        // 后台 UWP 窗口也常被 shell cloak，这类才算真正的"隐形窗口"（UWP 应用窗口可见时 cloak=0）
+        bool shellCloaked = (cloak & NativeMethods.DWM_CLOAKED_SHELL) != 0;
+        if (shellCloaked && IsUwpHostWindowClass(className)) return false;
 
         foreach (var shell in ShellWindowClasses)
         {
@@ -862,6 +871,14 @@ public sealed class ExplorerWatcher : IDisposable
 
         return result;
     }
+
+    /// <summary>
+    /// UWP 应用的宿主窗口类名。这类窗口在后台/最小化时会被 shell cloak，
+    /// 即使 IsWindowVisible 说是可见的，也不该当成 Alt+Tab / 接管的候选。
+    /// （UWP 应用真正显示在前台时 cloak 为 0，不受影响。）
+    /// </summary>
+    private static bool IsUwpHostWindowClass(string className)
+        => className is "ApplicationFrameWindow" or "ApplicationFrameHost" or "Windows.UI.Core.CoreWindow";
 
     /// <summary>
     /// 这个窗口类是不是"被悬浮栏接管"的那一类。

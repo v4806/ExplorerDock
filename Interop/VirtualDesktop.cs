@@ -61,6 +61,17 @@ internal static class VirtualDesktop
 
                 int hr = manager.IsWindowOnCurrentVirtualDesktop(hwnd, out int onCurrentDesktop);
 
+                // 明确的 COM 断连错误（explorer 重启后代理失效）：清缓存，下一轮重建再试。
+                // 其余失败（窗口无效 / 不是顶层窗口 / 接口拒绝）按"不过滤"处理，
+                // 不能因此丢掉缓存 —— 否则每个无效窗口都会触发一次重建。
+                if (hr == unchecked((int)0x80010108)      // RPC_E_DISCONNECTED
+                    || hr == unchecked((int)0x800401FD)   // CO_E_OBJNOTCONNECTED
+                    || hr == unchecked((int)0x80000013))  // RO_E_CLOSED
+                {
+                    ResetManager();
+                    return true;
+                }
+
                 // 非 S_OK（窗口无效、不是顶层窗口、接口拒绝）一律按"不过滤"处理
                 return hr != 0 || onCurrentDesktop != 0;
             }

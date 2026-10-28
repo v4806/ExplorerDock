@@ -22,6 +22,9 @@ internal sealed class ClipboardController : IDisposable
 
     private IntPtr _originForeground;
 
+    /// <summary>已经释放（剪贴板功能被总开关关掉）：排队的旧动作不能再把面板弹回来。</summary>
+    private bool _disposed;
+
     public ClipboardController(App app, ClipboardStore store)
     {
         _app = app;
@@ -53,12 +56,18 @@ internal sealed class ClipboardController : IDisposable
         ClipboardMonitor.Log($"clipboard takeover={App.Settings.ClipboardTakeover} installed={_app.WindowHost.KeyboardInstalled}");
 
         // 预热面板窗口句柄，第一次按 Win+V 就不用等窗口初始化
-        _app.Dispatcher.BeginInvoke(new Action(() => Panel.Preload()));
+        _app.Dispatcher.BeginInvoke(new Action(() =>
+        {
+            if (_disposed) return;   // 排队期间功能被关掉了：别再去碰已经关掉的面板
+            Panel.Preload();
+        }));
     }
 
     /// <summary>打开或收起面板（托盘菜单、调试参数也走这里）。</summary>
     public void Toggle()
     {
+        if (_disposed) return;
+
         try
         {
             if (Panel.IsVisible)
@@ -95,6 +104,8 @@ internal sealed class ClipboardController : IDisposable
 
     private void Post(Action action)
     {
+        if (_disposed) return;
+
         try
         {
             _app.Dispatcher.BeginInvoke(action);
@@ -197,9 +208,13 @@ internal sealed class ClipboardController : IDisposable
 
     public void Dispose()
     {
+        if (_disposed) return;
+        _disposed = true;
+
         try
         {
-            Panel.HidePanel();
+            // 彻底关掉面板：退订静态 ThemeChanged / 库 Changed、停计时器、关闭窗口
+            Panel.Cleanup();
         }
         catch
         {

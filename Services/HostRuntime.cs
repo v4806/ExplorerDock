@@ -53,6 +53,10 @@ internal sealed class HostRuntime : IDisposable
         TakeoverState.SetExplorerTakeover(App.Settings.TakeoverExplorer);
 
         if (App.Settings.TakeoverEnabled) _host.SetTakeover(true);
+
+        // 资源管理器接管开关也要在启动时同步给宿主侧：settings.json 里关着的话，
+        // 监视线程第一轮就按"不接管"跑，避免先摘一次按钮再还回去的闪动
+        _host.SetExplorerTakeover(App.Settings.TakeoverExplorer);
         _host.Start();
 
         // 计划任务（「以管理员身份运行」时的自启用它）**只有管理员权限才建得出来**，

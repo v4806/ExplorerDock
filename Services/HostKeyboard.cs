@@ -190,9 +190,12 @@ internal sealed class HostKeyboard : IDisposable
         {
             if (_winDown && !IsWinPhysicallyDown()) _winDown = false;
 
-            // V 的抬起事件丢了：之后还能收到别的按键，说明 V 早就松开了。
-            // 不修的话 _vSwallowed 会一直卡着，此后每次按 V 都被吞掉、V 键等于失灵。
-            if (_vSwallowed && stroke.Vk != VK_V) _vSwallowed = false;
+            // V 的抬起事件丢了：不修的话 _vSwallowed 会一直卡着，此后每次按 V 都被吞掉（V 键失灵）。
+            //
+            // 但"收到了别的键"本身不能证明 V 已松开：长按 V 时按其它键，V 物理上还按着，
+            // 这时复位会让紧随其后的 V 重复通知被当成新的一次 Win+V（面板反复切换 / 多余 V 输入）。
+            // 所以必须物理确认 V 已经松开才复位。
+            if (_vSwallowed && stroke.Vk != VK_V && !NativeMethods.IsKeyDown(VK_V)) _vSwallowed = false;
         }
 
         switch (stroke.Vk)

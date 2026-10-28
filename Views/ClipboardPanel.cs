@@ -673,6 +673,64 @@ internal sealed class ClipboardPanel : Window
         Hidden?.Invoke();
     }
 
+    /// <summary>
+    /// 彻底释放面板（剪贴板功能被总开关关掉时调用）。
+    ///
+    /// 只调 HidePanel 是不够的：窗口、事件订阅、计时器都还在 —— 面板订阅了**静态**的
+    /// App.ThemeChanged 和库的 Changed，不主动退订的话控制器/库/记录/缩略图会被一直引用住，
+    /// 反复开关剪贴板功能就是持续泄漏（codex 审核指出的问题）。
+    /// </summary>
+    internal void Cleanup()
+    {
+        try
+        {
+            _store.Changed -= OnStoreChanged;
+        }
+        catch
+        {
+            // 忽略
+        }
+
+        try
+        {
+            App.ThemeChanged -= OnAppThemeChanged;
+        }
+        catch
+        {
+            // 忽略
+        }
+
+        try
+        {
+            _taskbarHoverTimer.Stop();
+            _dragWatchTimer.Stop();
+            _foregroundWatch.Stop();
+        }
+        catch
+        {
+            // 忽略
+        }
+
+        try
+        {
+            HidePanel();
+        }
+        catch
+        {
+            // 忽略
+        }
+
+        try
+        {
+            // 关掉窗口：HWND hook 与窗口句柄随窗口销毁一起回收
+            Close();
+        }
+        catch
+        {
+            // 忽略
+        }
+    }
+
     private void OnAppThemeChanged()
     {
         if (!IsVisible) return;

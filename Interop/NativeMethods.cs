@@ -529,23 +529,35 @@ internal static class NativeMethods
     /// <summary>DwmGetWindowAttribute 的 DWMWA_CLOAKED：窗口"可见"其实被 DWM 藏着（UWP 常见）。</summary>
     public const int DWMWA_CLOAKED = 14;
 
+    /// <summary>
+    /// DWM_CLOAKED_SHELL：窗口被 shell 藏起来。
+    ///
+    /// 切换虚拟桌面时，非当前桌面的窗口就是被 shell cloak 的 —— 这种窗口仍然要接管
+    /// （否则切到那个桌面时任务栏按钮会重新冒出来），不能当成"隐形窗口"排除。
+    /// 应用自己藏起来的窗口（APP=1、INHERITED=4）才是真正该忽略的。
+    /// </summary>
+    public const int DWM_CLOAKED_SHELL = 0x2;
+
     [DllImport("user32.dll", SetLastError = true)]
     public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
 
     [DllImport("dwmapi.dll")]
     private static extern int DwmGetWindowAttribute(IntPtr hwnd, int dwAttribute, out int pvAttribute, int cbAttribute);
 
-    public static bool IsCloaked(IntPtr hwnd)
+    /// <summary>取窗口的 cloak 标志位（0 = 没被藏；位掩码见 DWM_CLOAKED_*）。</summary>
+    public static int GetCloakValue(IntPtr hwnd)
     {
         try
         {
-            return DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, out int value, sizeof(int)) == 0 && value != 0;
+            return DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, out int value, sizeof(int)) == 0 ? value : 0;
         }
         catch
         {
-            return false;
+            return 0;
         }
     }
+
+    public static bool IsCloaked(IntPtr hwnd) => GetCloakValue(hwnd) != 0;
 
     [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true, EntryPoint = "SendMessageTimeoutW")]
     private static extern IntPtr SendMessageTimeoutIcon(
