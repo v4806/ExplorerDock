@@ -331,6 +331,15 @@ internal sealed class HostRuntime : IDisposable
             var message = HostProtocol.Decode(line);
             if (message is null) continue;
 
+            // 键状态是 volatile 镜像更新，不依赖 GUI 线程。必须绕过 HostGui 忙跳过：
+            // 一次跳过启用/禁用会让宿主长期停在错误的 Win+V 接管状态。
+            if (message.Cmd == HostProtocol.CmdKeyState)
+            {
+                ApplyKeyState(message);
+                Reply(message);
+                continue;
+            }
+
             // 窗口操作统一丢到 GUI 线程上做（见 _guiQueue 的注释）：
             // 线程池线程没有消息队列，SetFocus 那种操作在那里是不可靠的。
             //
@@ -374,6 +383,10 @@ internal sealed class HostRuntime : IDisposable
                 case HostProtocol.CmdStart:
                     _host.SetTakeover(message.Enabled);
                     _host.SetExplorerTakeover(message.TakeoverExplorer);
+
+                    // watcher 可能已经在界面连上之前跑过第一轮；这里请求下一轮无条件补发，
+                    // 避免窗口集合与前台都没变化时 UI 永远收不到首份快照。
+                    _host.ReapplyNow();
                     break;
 
                 case HostProtocol.CmdTakeover:
@@ -450,12 +463,7 @@ internal sealed class HostRuntime : IDisposable
                     break;
 
                 case HostProtocol.CmdKeyState:
-                    _host.SetKeyState(
-                        message.TakeoverAltTab,
-                        message.TakeoverClipboard,
-                        message.PanelOpen);
-
-                    message.Ok = _host.KeyboardInstalled;
+                    ApplyKeyState(message);
                     break;
 
                 case HostProtocol.CmdIsForeground:
@@ -541,6 +549,16 @@ internal sealed class HostRuntime : IDisposable
         foreach (var card in cards) list.Add(HostProtocol.ToDto(card));
 
         return list;
+    }
+
+    private void ApplyKeyState(HostMessage message)
+    {
+        _host.SetKeyState(
+            message.TakeoverAltTab,
+            message.TakeoverClipboard,
+            message.PanelOpen);
+
+        message.Ok = _host.KeyboardInstalled;
     }
 
     private static List<ProcessDto> ToProcessList(List<RunningProcessInfo> processes)

@@ -327,7 +327,7 @@ public partial class App : Application
 
         // 剪贴板库：先解密载入历史，再开始监听剪贴板变化；随后接上 Win+V 接管。
         // 总开关关着（issue #11）就完全不创建 —— 不监听、不占内存，给不用这个功能的人一个零占用的选项。
-        if (Settings.ClipboardEnabled) StartClipboard();
+        if (Settings.ClipboardEnabled) StartClipboardWithRollback();
 
         _quitEvent = new EventWaitHandle(false, EventResetMode.ManualReset, QuitEventName);
         StartQuitListener();
@@ -1311,17 +1311,12 @@ public partial class App : Application
         Settings.ClipboardEnabled = enabled;
         Settings.Save();
 
+        // 先让宿主交还 Win+V，再拆监听与面板；关闭过程中的在途按键仍有明确状态。
+        PushKeyState();
+
         if (enabled)
         {
-            StartClipboard();
-
-            // 启动失败（StartClipboard 里已经提示过用户）就把总开关改回关闭，
-            // 别让设置里显示"开着"、实际 Win+V 却没反应
-            if (!_clipboardStarted)
-            {
-                Settings.ClipboardEnabled = false;
-                Settings.Save();
-            }
+            StartClipboardWithRollback();
         }
         else
         {
@@ -1361,12 +1356,29 @@ public partial class App : Application
             _clipboardStarted = false;
         }
 
-        // Win+V 能不能接管取决于总开关：关掉后立刻把热键交还系统
-        PushKeyState();
+        if (enabled) PushKeyState();
     }
 
     /// <summary>剪贴板历史是否已经启动（总开关关闭时为 false）。</summary>
     private bool _clipboardStarted;
+
+    /// <summary>
+    /// 启动失败（StartClipboard 里已经提示过用户）就把总开关改回关闭，
+    /// 冷启动与设置页开启共用同一回滚，避免 UI 显示“开着”但实际没监听。
+    /// </summary>
+    private bool StartClipboardWithRollback()
+    {
+        StartClipboard();
+        if (_clipboardStarted) return true;
+
+        if (Settings.ClipboardEnabled)
+        {
+            Settings.ClipboardEnabled = false;
+            Settings.Save();
+        }
+
+        return false;
+    }
 
     /// <summary>
     /// 启动剪贴板历史：解密载入历史 → 开始监听剪贴板变化 → 接上 Win+V 接管。

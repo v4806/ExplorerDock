@@ -30,6 +30,10 @@
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.4191.47" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Compile Remove="tests\**\*.cs" />
+  </ItemGroup>
+
   <!--
     这里本来有一段"publish 后剔除用不到的运行时文件"的处理，用来压安装包体积（49.5MB → 37MB）。
     已经删掉了：删 PresentationFramework.Fluent.dll 会让 WPF 的默认控件模板加载失败

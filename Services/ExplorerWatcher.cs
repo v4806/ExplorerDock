@@ -97,6 +97,9 @@ public sealed class ExplorerWatcher : IDisposable
     /// <summary>设置变化后让下一轮立刻跑，不等这 350ms。</summary>
     private volatile bool _forceReapply;
 
+    /// <summary>即使窗口集合与前台都没变，也补发一份完整快照。</summary>
+    private int _forceSnapshot;
+
     private IntPtr _lastForeground;
     private int _tick;
 
@@ -196,7 +199,9 @@ public sealed class ExplorerWatcher : IDisposable
                     changed = true;
                 }
 
-                if (changed)
+                bool forceSnapshot = ConsumeSnapshotRequest();
+
+                if (changed || forceSnapshot)
                 {
                     SnapshotUpdated?.Invoke(new ExplorerSnapshot
                     {
@@ -1030,8 +1035,20 @@ public sealed class ExplorerWatcher : IDisposable
         _stripped.Clear();
     }
 
-    /// <summary>设置变化后立刻对所有窗口生效（下一次轮询也会自动生效，这里只是不等那 350ms）。</summary>
-    public void ReapplyNow() => _forceReapply = true;
+    /// <summary>
+    /// 设置变化后立刻对所有窗口生效，并在下一轮补发完整快照。
+    /// 界面刚连上宿主时，首轮快照可能早于管道建立，必须靠这次无条件发布补回来。
+    /// </summary>
+    public void ReapplyNow()
+    {
+        Interlocked.Exchange(ref _forceSnapshot, 1);
+        _forceReapply = true;
+    }
+
+    private bool ConsumeSnapshotRequest()
+        => Interlocked.Exchange(ref _forceSnapshot, 0) != 0;
+
+    internal bool ConsumeSnapshotRequestForTest() => ConsumeSnapshotRequest();
 
     /// <summary>接管关闭后，把当前已知窗口全部还原。</summary>
     public void RestoreNow() => RestoreAll();

@@ -15,19 +15,13 @@ namespace ExplorerDock.Services;
 /// </summary>
 internal sealed class HostKeyboard : IDisposable
 {
-    private const int VK_LWIN = 0x5B;
-    private const int VK_RWIN = 0x5C;
-    private const int VK_V = 0x56;
-    private const int VK_SHIFT = 0x10;
-    private const int VK_CONTROL = 0x11;
-    private const int VK_MENU = 0x12;
-
     private readonly KeyboardHook _hook = new();
     private readonly Action<string> _notify;
+    private readonly ClipboardHotkeyStateMachine _clipboardKeys = new();
 
     // ---------- 界面推过来的状态镜像 ----------
     private volatile bool _altTabTakeover = true;
-    private volatile bool _clipboardTakeover = true;
+    private volatile bool _clipboardTakeover;
 
     /// <summary>界面是否正在接管中（面板开着、或者窗口列表还在数）。</summary>
     private volatile bool _panelOpen;
@@ -37,9 +31,6 @@ internal sealed class HostKeyboard : IDisposable
     // ---------- 钩子自己跟踪的按键状态 ----------
     private volatile bool _altDown;
     private volatile bool _shiftDown;
-    private volatile bool _winDown;
-    private bool _swallowWinUp;
-    private bool _vSwallowed;
 
     /// <param name="notify">把按键动作推出去（同进程就是直接回调，跨进程就是写管道）。</param>
     public HostKeyboard(Action<string> notify)
@@ -161,114 +152,22 @@ internal sealed class HostKeyboard : IDisposable
         }
     }
 
-    /// <summary>
-    /// Win 键在物理上是不是按着（以键盘驱动状态为准，不看我们缓存的 <see cref="_winDown"/>）。
-    ///
-    /// 缓存状态会因为抬起的按键事件丢失而卡住 —— 钩子每 20 秒重挂一次有空档、UAC/锁屏
-    /// 切换、别的程序抢键都会丢事件。缓存一旦停在"Win 按着"，之后普通打字按到 V
-    /// 就会被当成 Win+V 弹出剪贴板面板（issue #10 的误触发），所以判定前用物理状态校正。
-    /// </summary>
-    private static bool IsWinPhysicallyDown()
-    {
-        try
-        {
-            return NativeMethods.IsKeyDown(VK_LWIN) || NativeMethods.IsKeyDown(VK_RWIN);
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
     private bool HandleClipboard(KeyStroke stroke)
     {
-        if (!_clipboardTakeover) return false;
+        var decision = _clipboardKeys.Process(stroke, _clipboardTakeover, NativeMethods.IsKeyDown);
 
-        // 状态自愈：抬起事件丢了就把缓存修回来。每次按键只多两次 GetAsyncKeyState
-        //（微秒级），不会拖慢钩子回调。注入的按键在自动化验证时物理状态不可信，跳过。
-        if (!stroke.Injected)
+        switch (decision)
         {
-            if (_winDown && !IsWinPhysicallyDown()) _winDown = false;
-
-            // V 的抬起事件丢了：不修的话 _vSwallowed 会一直卡着，此后每次按 V 都被吞掉（V 键失灵）。
-            //
-            // 但"收到了别的键"本身不能证明 V 已松开：长按 V 时按其它键，V 物理上还按着，
-            // 这时复位会让紧随其后的 V 重复通知被当成新的一次 Win+V（面板反复切换 / 多余 V 输入）。
-            // 所以必须物理确认 V 已经松开才复位。
-            if (_vSwallowed && stroke.Vk != VK_V && !NativeMethods.IsKeyDown(VK_V)) _vSwallowed = false;
-        }
-
-        switch (stroke.Vk)
-        {
-            case VK_LWIN:
-            case VK_RWIN:
-                if (stroke.Down)
-                {
-                    // 新的一次 Win 按下：上一轮可能因为抬起丢失而没走完。
-                    // 先把遗留标记作废，否则这次 Win 抬起会被吞、开始菜单弹不出来。
-                    _swallowWinUp = false;
-                    _vSwallowed = false;
-                    _winDown = true;
-                    return false;   // Win 键本身放行：开始菜单、其它 Win 组合键都不该受影响
-                }
-
-                _winDown = false;
-
-                if (!_swallowWinUp) return false;
-
-                _swallowWinUp = false;
-
-                // 吞掉这次抬起（系统不该看到它，否则开始菜单会跟着弹），
-                // 再补一次注入的抬起让 Win 键状态闭合 —— 不补的话 Win 会"卡住"，
-                // 之后所有按键都会被当成 Win 组合，面板根本收不到键盘。
-                NativeMethods.SendKeyUp((ushort)stroke.Vk);
+            case ClipboardHotkeyDecision.ToggleClipboard:
+                NativeMethods.SendWitnessKey();
+                _notify(HostProtocol.KeyToggleClipboard);
                 return true;
 
-            case VK_V:
-                if (stroke.Down)
-                {
-                    // 长按时 V 会不停重复发 down。这些重复事件必须继续吞掉：
-                    // 一旦放行，系统就看到了 V，会把它自己那个剪贴板面板也弹出来。
-                    if (_vSwallowed) return true;
+            case ClipboardHotkeyDecision.SwallowAndRestoreWin:
+                return NativeMethods.TrySendKeyUp((ushort)stroke.Vk);
 
-                    // 以物理键盘为准：缓存说 Win 按着、实际没按 → 状态是脏的。
-                    // 复位缓存并把 V 原样放行，用户该打字的照常打字（issue #10）。
-                    // 注入事件（自动化验证）没有可信的物理状态，只能退回缓存判断。
-                    if (stroke.Injected)
-                    {
-                        if (!_winDown) return false;
-                    }
-                    else if (!IsWinPhysicallyDown())
-                    {
-                        _winDown = false;
-                        return false;
-                    }
-
-                    // 只有"纯 Win+V"归我们，Ctrl/Alt/Shift 掺进来的组合照旧给系统
-                    if (NativeMethods.IsKeyDown(VK_CONTROL)
-                        || NativeMethods.IsKeyDown(VK_MENU)
-                        || NativeMethods.IsKeyDown(VK_SHIFT))
-                    {
-                        return false;
-                    }
-
-                    _vSwallowed = true;
-                    _swallowWinUp = true;
-
-                    // 先补一个"见证按键"：不然系统会把随后的 Win 抬起当成单击 Win，弹开始菜单
-                    NativeMethods.SendWitnessKey();
-
-                    _notify(HostProtocol.KeyToggleClipboard);
-                    return true;
-                }
-
-                if (_vSwallowed)
-                {
-                    _vSwallowed = false;
-                    return true;   // V 的抬起也吞掉，别让前台窗口收到半个组合键
-                }
-
-                return false;
+            case ClipboardHotkeyDecision.Swallow:
+                return true;
 
             default:
                 return false;

@@ -166,6 +166,84 @@ internal static class VirtualDesktop
             }
         }
     }
+
+    /// <summary>
+    /// 为调用线程创建一个独立的即时查询器。Alt+Tab 的新一次枚举必须用本次结果，
+    /// 不能读取监视线程上一轮发布的桌面快照。
+    /// </summary>
+    public static VirtualDesktopProbe? CreateProbe()
+    {
+        try
+        {
+            var type = Type.GetTypeFromCLSID(Clsid);
+            if (type is null) return null;
+
+            return new VirtualDesktopProbe(
+                (IVirtualDesktopManager)Activator.CreateInstance(type)!);
+        }
+        catch
+        {
+            // 系统不支持或 COM 暂不可用：调用方按"不过滤"处理。
+            return null;
+        }
+    }
+
+    /// <summary>新查询器为空时退化为不过滤；创建失败绝不丢窗口。</summary>
+    public static bool IsOnCurrentDesktop(IntPtr hwnd, VirtualDesktopProbe? probe)
+        => hwnd == IntPtr.Zero || probe is null || probe.IsOnCurrentDesktop(hwnd);
+}
+
+/// <summary>
+/// 绑定在创建线程上的虚拟桌面查询器，供 Alt+Tab 这种一次性问题即时使用。
+/// </summary>
+internal sealed class VirtualDesktopProbe : IDisposable
+{
+    private readonly IVirtualDesktopManager? _manager;
+    private readonly Func<IntPtr, bool>? _query;
+    private bool _disposed;
+
+    internal VirtualDesktopProbe(
+        IVirtualDesktopManager? manager = null,
+        Func<IntPtr, bool>? query = null)
+    {
+        _manager = manager;
+        _query = query;
+    }
+
+    public bool IsOnCurrentDesktop(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero || _disposed) return true;
+
+        try
+        {
+            if (_query is not null) return _query(hwnd);
+            if (_manager is null) return true;
+
+            int hr = _manager.IsWindowOnCurrentVirtualDesktop(hwnd, out int onCurrentDesktop);
+            return hr != 0 || onCurrentDesktop != 0;
+        }
+        catch
+        {
+            return true;
+        }
+    }
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+
+        if (_manager is null) return;
+
+        try
+        {
+            Marshal.ReleaseComObject(_manager);
+        }
+        catch
+        {
+            // 代理已失效：交给 GC。
+        }
+    }
 }
 
 /// <summary>IVirtualDesktopManager（只声明到需要的方法；vtable 顺序必须和系统接口一致）。</summary>

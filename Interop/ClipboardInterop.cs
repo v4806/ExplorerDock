@@ -1,4 +1,5 @@
 using System.IO;
+using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Threading;
@@ -76,7 +77,7 @@ internal sealed class ClipboardMessageWindow : IDisposable
 {
     private readonly HwndSource _source;
 
-    public ClipboardMessageWindow()
+    public ClipboardMessageWindow(Func<IntPtr, bool>? addListener = null)
     {
         var parameters = new HwndSourceParameters("ExplorerDock.ClipboardListener")
         {
@@ -91,7 +92,25 @@ internal sealed class ClipboardMessageWindow : IDisposable
         _source = new HwndSource(parameters);
         _source.AddHook(WndProc);
 
-        ClipboardInterop.AddClipboardFormatListener(_source.Handle);
+        bool registered;
+
+        try
+        {
+            registered = (addListener ?? ClipboardInterop.AddClipboardFormatListener)(_source.Handle);
+        }
+        catch
+        {
+            _source.RemoveHook(WndProc);
+            _source.Dispose();
+            throw;
+        }
+
+        if (registered) return;
+
+        int error = Marshal.GetLastWin32Error();
+        _source.RemoveHook(WndProc);
+        _source.Dispose();
+        throw new Win32Exception(error, "无法监听剪贴板变化");
     }
 
     /// <summary>剪贴板内容变了（已经在 UI 线程）。</summary>

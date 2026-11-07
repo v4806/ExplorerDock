@@ -230,6 +230,16 @@ internal sealed class AltTabController : IDisposable
             Priority = ThreadPriority.AboveNormal,
         };
 
+        // 本地回退路径的即时虚拟桌面查询需要 STA；远程路径由 HostGui 提供同一条件。
+        try
+        {
+            thread.SetApartmentState(ApartmentState.STA);
+        }
+        catch
+        {
+            // 平台不支持时保持默认公寓，桌面查询失败会退化为不过滤。
+        }
+
         thread.Start();
     }
 

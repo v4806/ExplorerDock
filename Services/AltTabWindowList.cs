@@ -169,12 +169,13 @@ internal static class AltTabWindowList
     /// 自动接管进来的程序，在这里也会跟着参与同名进程打包。
     ///
     /// 另外只保留**当前虚拟桌面**上的窗口（issue #9）：别的桌面上的窗口虽然仍被接管，
-    /// 但不该出现在 Alt+Tab / Alt+~ 里。桌面归属查 <see cref="TakeoverState"/> 的快照，
-    /// 不在这里直接调 COM。
+    /// 但不该出现在 Alt+Tab / Alt+~ 里。这里每次枚举都创建独立的 COM 查询器，
+    /// 避免刚切换桌面时读到监视线程上一轮的快照。
     /// </summary>
     private static List<Candidate> EnumerateCandidates(int max)
     {
         var result = new List<Candidate>();
+        using var desktopProbe = VirtualDesktop.CreateProbe();
 
         NativeMethods.EnumWindows((hwnd, _) =>
         {
@@ -184,10 +185,8 @@ internal static class AltTabWindowList
 
                 if (!ExplorerWatcher.TryDescribeWindow(hwnd, out var window)) return true;
 
-                // 只保留当前虚拟桌面上的窗口：切到别的桌面后，Alt+Tab / Alt+~ 里不该再出现
-                // 原来那个桌面的窗口。查的是监视线程发布的快照（本方法可能被多个线程调用，
-                // 而且每按一次快捷键都现场跨进程调 COM 不划算）；没有快照时不过滤（老行为）。
-                if (!TakeoverState.IsOnCurrentDesktop(window.Handle)) return true;
+                // 以本次枚举的即时结果为准；COM 失败时查询器为空，退化成不过滤。
+                if (!VirtualDesktop.IsOnCurrentDesktop(window.Handle, desktopProbe)) return true;
 
                 bool takeover = TakeoverState.IsTakeoverWindow(hwnd, window.ClassName);
 

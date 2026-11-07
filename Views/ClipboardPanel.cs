@@ -946,12 +946,14 @@ internal sealed class ClipboardPanel : Window
     ///   - 类型关键词："图片" 匹配图片记录，"文件" 匹配文件记录。
     /// 搜索词为空时全部通过。
     /// </summary>
-    private bool MatchesSearch(ClipItem item)
+    private bool MatchesSearch(ClipItem item) => MatchesSearchText(item, _searchText);
+
+    internal static bool MatchesSearchText(ClipItem item, string searchText)
     {
-        if (!HasSearchText) return true;
+        if (string.IsNullOrEmpty(searchText)) return true;
 
         if (item.Text is { Length: > 0 } text
-            && text.Contains(_searchText, StringComparison.OrdinalIgnoreCase))
+            && text.Contains(searchText, StringComparison.OrdinalIgnoreCase))
         {
             return true;
         }
@@ -964,8 +966,8 @@ internal sealed class ClipboardPanel : Window
 
                 var name = Path.GetFileName(path);
 
-                if (path.Contains(_searchText, StringComparison.OrdinalIgnoreCase)
-                    || name.Contains(_searchText, StringComparison.OrdinalIgnoreCase))
+                if (path.Contains(searchText, StringComparison.OrdinalIgnoreCase)
+                    || name.Contains(searchText, StringComparison.OrdinalIgnoreCase))
                 {
                     return true;
                 }
@@ -973,8 +975,8 @@ internal sealed class ClipboardPanel : Window
         }
 
         // 类型关键词：输入"图片"能找出所有图片记录，输入"文件"能找出所有文件记录
-        if (item.Kind == ClipKind.Image && _searchText.Contains("图片", StringComparison.Ordinal)) return true;
-        if (item.Kind == ClipKind.Files && _searchText.Contains("文件", StringComparison.Ordinal)) return true;
+        if (item.Kind == ClipKind.Image && searchText.Contains("图片", StringComparison.Ordinal)) return true;
+        if (item.Kind == ClipKind.Files && searchText.Contains("文件", StringComparison.Ordinal)) return true;
 
         return false;
     }
@@ -2014,15 +2016,17 @@ internal sealed class ClipboardPanel : Window
                 break;
 
             case Key.Delete:
-                // 在搜索框里改文字时 Delete 是删字符，不能误删剪贴记录
-                // （搜索框为空时 Delete 本来也没字可删，保持原来的"删除选中记录"行为）
-                if (_searchBox.IsKeyboardFocusWithin && _searchBox.Text.Length > 0) break;
+                // 只要焦点在搜索框，Delete 就属于文本框；空框时也不能顺手删掉选中历史。
+                if (!ShouldDeleteSelectedHistory(_searchBox.IsKeyboardFocusWithin, _searchBox.Text.Length)) break;
 
                 if (SelectedItem is { } target) DeleteRequested?.Invoke(target);
                 e.Handled = true;
                 break;
         }
     }
+
+    internal static bool ShouldDeleteSelectedHistory(bool searchBoxHasFocus, int searchTextLength)
+        => !searchBoxHasFocus;
 
     /// <summary>
     /// 收藏浮窗：点某条的 ☆ 时弹出来，用一排按钮列出全部分组（不用下拉菜单），

@@ -688,15 +688,16 @@ internal static class NativeMethods
         ki = new KEYBDINPUT { wVk = vk, dwFlags = up ? KEYEVENTF_KEYUP : 0 },
     };
 
-    private static void SendKeys(INPUT[] inputs)
+    private static bool SendKeys(INPUT[] inputs)
     {
         try
         {
-            SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<INPUT>());
+            return SendInput((uint)inputs.Length, inputs, Marshal.SizeOf<INPUT>()) == inputs.Length;
         }
         catch
         {
             // 补发失败也不影响主流程
+            return false;
         }
     }
 
@@ -706,7 +707,9 @@ internal static class NativeMethods
     /// 我们把某些键的抬起吞掉了（不然前台程序会收到半个组合键），
     /// 代价是系统可能以为它还按着 —— 补发的事件带注入标志，不会再被我们自己的钩子吃一遍。
     /// </summary>
-    public static void SendKeyUp(ushort vk) => SendKeys(new[] { KeyInput(vk, true) });
+    public static bool TrySendKeyUp(ushort vk) => SendKeys(new[] { KeyInput(vk, true) });
+
+    public static void SendKeyUp(ushort vk) => TrySendKeyUp(vk);
 
     /// <summary>补发一次按键按下。</summary>
     public static void SendKeyDown(ushort vk) => SendKeys(new[] { KeyInput(vk, false) });

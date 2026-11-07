@@ -119,7 +119,12 @@ internal static class TakeoverState
     /// 可在「接管指定程序…」里取消，issue #11）；其余按监视线程发布的窗口集合判定。
     /// </summary>
     public static bool IsTakeoverWindow(IntPtr hwnd, string className)
-        => (_explorerTakeover && ExplorerWatcher.IsTakeoverWindowClass(className)) || _handles.Contains(hwnd);
+    {
+        // Explorer 只服从自己的开关；上一轮的集合还可能包含它，不能盖掉刚关闭的偏好。
+        if (ExplorerWatcher.IsTakeoverWindowClass(className)) return _explorerTakeover;
+
+        return _handles.Contains(hwnd);
+    }
 
     /// <summary>是否接管文件资源管理器窗口（默认 true，界面进程推过来）。</summary>
     public static void SetExplorerTakeover(bool enabled) => _explorerTakeover = enabled;
