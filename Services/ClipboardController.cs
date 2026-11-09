@@ -23,7 +23,7 @@ internal sealed class ClipboardController : IDisposable
     private IntPtr _originForeground;
 
     /// <summary>已经释放（剪贴板功能被总开关关掉）：排队的旧动作不能再把面板弹回来。</summary>
-    private bool _disposed;
+    private volatile bool _disposed;
 
     public ClipboardController(App app, ClipboardStore store)
     {
@@ -122,26 +122,34 @@ internal sealed class ClipboardController : IDisposable
     private void OnItemActivated(ClipItem item)
     {
         var origin = _originForeground;
+        long clickStarted = Environment.TickCount64;
 
         // 把"要粘到哪个窗口"传下去：Office 才需要 HTML/RTF 保排版，
         // 聊天软件（QQ）拿到 HTML 反而会去解析里面失效的图片路径，结果什么都不粘
         if (!_app.WriteClipItemToClipboard(item, origin)) return;
 
+        long clipboardWritten = Environment.TickCount64;
         Panel.HidePanel();
 
         if (origin == IntPtr.Zero || !NativeMethods.IsWindow(origin)) return;
 
         // 面板抢过焦点，这里把前台还给用户原来的窗口
         _app.WindowHost.Activate(origin, -1);
+        long activated = Environment.TickCount64;
 
-        // 切前台是异步的：立刻发按键会落到我们自己或别的窗口上，等一小会儿再补
-        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(120) };
-        timer.Tick += (_, _) =>
+        // 切前台是异步的：稍等再补 Ctrl+V。不能再用 WPF DispatcherTimer：
+        // 它在 Background 优先级上，会被面板隐藏后的布局/渲染队列饿住，日志里实测会拖到 2-3 秒。
+        _ = ClipboardPasteScheduler.SendAsync(TimeSpan.FromMilliseconds(120), () =>
         {
-            timer.Stop();
+            if (_disposed) return;
             _app.WindowHost.SendPaste();
-        };
-        timer.Start();
+        }, elapsed =>
+        {
+            ClipboardMonitor.Log(
+                $"paste sent: click->{activated - clickStarted}ms, " +
+                $"write={clipboardWritten - clickStarted}ms, " +
+                $"activate={activated - clipboardWritten}ms, schedule={elapsed}ms");
+        });
     }
 
     /// <summary>

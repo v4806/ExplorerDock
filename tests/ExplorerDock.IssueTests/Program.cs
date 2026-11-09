@@ -337,6 +337,28 @@ Run("actual virtual desktop COM probe is available", () =>
     });
 });
 
+Run("post-activation paste runs off the WPF dispatcher", () =>
+{
+    var called = new ManualResetEventSlim(false);
+    var threadPool = false;
+    long elapsedMs = 0;
+    var started = Environment.TickCount64;
+
+    var task = ClipboardPasteScheduler.SendAsync(
+        TimeSpan.FromMilliseconds(40),
+        () =>
+        {
+            threadPool = Thread.CurrentThread.IsThreadPoolThread;
+            elapsedMs = Environment.TickCount64 - started;
+            called.Set();
+        });
+
+    True("paste callback ran", called.Wait(1000));
+    True("scheduler task completed", task.Wait(1000));
+    True("callback ran on thread pool", threadPool);
+    True("delay was respected", elapsedMs >= 30);
+});
+
 Console.WriteLine(failures == 0 ? "PASS all issue tests" : $"FAIL {failures} issue test(s)");
 return failures == 0 ? 0 : 1;
 
