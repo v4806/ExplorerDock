@@ -42,7 +42,6 @@ public partial class DockWindow : Window
     private ShadowWindow? _shadow;
     private ExplorerSnapshot? _lastSnapshot;
     private readonly DispatcherTimer _topmostTimer;
-    private DateTime _lastTopmostFix = DateTime.MinValue;
     private bool _dragging;
     private Point _pressPoint;
 
@@ -942,7 +941,7 @@ public partial class DockWindow : Window
 
     /// <summary>
     /// 把悬浮栏重新钉回最上层，并保持阴影层压在它下面。
-    /// 只在"命中测试发现真的被压在下面"时才动手：光看 WS_EX_TOPMOST 样式不够，
+    /// 只在失去置顶或被上方窗口遮住时才动手：光看 WS_EX_TOPMOST 样式不够，
     /// 因为别的置顶窗口（照片、播放器等）会把它挤到 Topmost 组内的后面，
     /// 那时样式还在，但点上去的其实是别人。
     /// </summary>
@@ -956,16 +955,30 @@ public partial class DockWindow : Window
 
         var shadowHandle = ShadowHandle();
 
-        // 无条件重钉一遍。
-        //
-        // 原来是"探测到被别的窗口盖住才钉、而且 1.5 秒内只钉一次"，于是点一下任务栏
-        // （它自己也是置顶窗、一点就插到我们前面）之后，要等一两秒才回来 ——
-        // 用户的感觉就是"任务栏把悬浮栏挡住了，得再点一下悬浮栏才恢复"。
-        // 这里只重新置顶一次，不再"先落到普通层再置顶"两步走：
-        // 落回普通层的那一瞬间窗口会掉出 Topmost 组，下面压着的窗口会露出来并被重绘，
-        // 半秒一次就成了用户看到的"悬浮栏每隔一段时间闪一下"。
-        // 单次 HWND_TOPMOST 同样能把已经是置顶的窗口提到 Topmost 组最前面（只是改样式才插不了队）。
-        _lastTopmostFix = DateTime.UtcNow;
+        if ((NativeMethods.GetWindowLongPtr(dockHandle, NativeMethods.GWL_EXSTYLE) &
+             NativeMethods.WS_EX_TOPMOST) != 0)
+        {
+            if (!NativeMethods.GetWindowRect(dockHandle, out var dockBounds)) return;
+
+            bool covered = false;
+            for (var above = NativeMethods.GetWindow(dockHandle, NativeMethods.GW_HWNDPREV);
+                 above != IntPtr.Zero;
+                 above = NativeMethods.GetWindow(above, NativeMethods.GW_HWNDPREV))
+            {
+                if (above == shadowHandle || !NativeMethods.IsWindowVisible(above) ||
+                    NativeMethods.IsIconic(above) || NativeMethods.IsCloaked(above) ||
+                    !NativeMethods.GetWindowRect(above, out var bounds)) continue;
+
+                if (bounds.Left < dockBounds.Right && bounds.Right > dockBounds.Left &&
+                    bounds.Top < dockBounds.Bottom && bounds.Bottom > dockBounds.Top)
+                {
+                    covered = true;
+                    break;
+                }
+            }
+
+            if (!covered) return;
+        }
 
         NativeMethods.SetWindowPos(dockHandle, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
             NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);

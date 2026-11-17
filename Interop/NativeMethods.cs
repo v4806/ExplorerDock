@@ -92,6 +92,7 @@ internal static class NativeMethods
 
     public const uint GW_OWNER = 4;
     public const uint GW_HWNDNEXT = 2;
+    public const uint GW_HWNDPREV = 3;
 
     public const uint WM_CLOSE = 0x0010;
 
