@@ -28,6 +28,10 @@ internal sealed class AltTabController : IDisposable
     /// <summary>这一轮列表是不是"只含当前进程"（Alt+~ 打开的）。</summary>
     private volatile bool _processScoped;
     private int _pendingTabs;
+    private int _iconLoadGeneration;
+    private readonly object _activationGate = new();
+    private (IntPtr Handle, int TabIndex, bool RestoreAlt)? _pendingActivation;
+    private bool _activationPumpRunning;
     private IntPtr _originForeground;
 
     /// <summary>拖放悬停已经激活过哪张卡（DragOver 触发很密，同一张卡只抢一次前台）。</summary>
@@ -197,6 +201,7 @@ internal sealed class AltTabController : IDisposable
     /// </summary>
     private void Open(bool currentProcessOnly)
     {
+        Interlocked.Increment(ref _iconLoadGeneration);
         _opening = true;
         SyncKeyState();
         _pendingTabs = 0;
@@ -247,12 +252,6 @@ internal sealed class AltTabController : IDisposable
     {
         _opening = false;
 
-        // 不管后面走哪条分支，先把"已经不在 opening 了"同步给宿主。
-        //
-        // 少了这一句，"打开面板的过程中就松手"那条路（下面直接切换、不弹面板）会漏掉同步：
-        // 宿主还记着 panelOpen=true，于是 ESC 被它一直吞掉 —— 用户报的"ESC 有时候卡住按了没反应"。
-        SyncKeyState();
-
         bool processScoped = _processScoped;
         _processScoped = false;
 
@@ -278,6 +277,8 @@ internal sealed class AltTabController : IDisposable
             _items = items;
 
             int target = Wrap(InitialIndex(items, foreground) + pending, items.Count);
+
+            SyncKeyState();
             Activate(items[target].Handle, items[target].TabIndex);
             return;
         }
@@ -292,6 +293,44 @@ internal sealed class AltTabController : IDisposable
 
         EnsureOverlay().Present(items, _index);
         StartThumbnails();
+        StartCardIcons(items);
+    }
+
+    private void StartCardIcons(List<AltTabWindowInfo> items)
+    {
+        int generation = Interlocked.Increment(ref _iconLoadGeneration);
+
+        if (items.All(item => item.Icon is not null)) return;
+
+        var thread = new Thread(() =>
+        {
+            foreach (var item in items)
+            {
+                if (item.Icon is not null || !NativeMethods.IsWindow(item.Handle)) continue;
+
+                try
+                {
+                    item.Icon = ShellInterop.GetWindowIcon(item.Handle);
+                }
+                catch
+                {
+                    // 单个图标失败不影响其余卡片
+                }
+            }
+
+            Post(() =>
+            {
+                if (!_active || generation != Volatile.Read(ref _iconLoadGeneration)) return;
+                _overlay?.ApplyIcons(items);
+            });
+        })
+        {
+            IsBackground = true,
+            Name = "ExplorerDock.AltTabIcons",
+            Priority = ThreadPriority.BelowNormal,
+        };
+
+        thread.Start();
     }
 
     private void Move(int delta)
@@ -409,7 +448,7 @@ internal sealed class AltTabController : IDisposable
         _dragHoverIndex = index;
 
         Log($"card drag hover -> activate hwnd=0x{item.Handle.ToInt64():X}");
-        _app.WindowHost.Activate(item.Handle, -1);
+        QueueActivation(item.Handle, -1, restoreAlt: false);
     }
 
     /// <summary>
@@ -446,15 +485,58 @@ internal sealed class AltTabController : IDisposable
     }
 
     private void Activate(IntPtr hwnd, int tabIndex)
+        => QueueActivation(hwnd, tabIndex, restoreAlt: true);
+
+    private void QueueActivation(IntPtr hwnd, int tabIndex, bool restoreAlt)
     {
         if (!NativeMethods.IsWindow(hwnd)) return;
 
-        // 激活窗口（必要时切标签页）交给窗口宿主：活动窗口是管理员程序时，
-        // 不提权这一步会直接失效
-        _app.WindowHost.Activate(hwnd, tabIndex);
+        lock (_activationGate)
+        {
+            _pendingActivation = (hwnd, tabIndex, restoreAlt);
 
-        // 这个补发也得由提权进程发，否则管理员窗口收不到、Alt 会卡在按下状态
-        _app.WindowHost.RestoreAltKey();
+            if (_activationPumpRunning) return;
+            _activationPumpRunning = true;
+        }
+
+        _ = PumpActivationsAsync();
+    }
+
+    private async Task PumpActivationsAsync()
+    {
+        while (true)
+        {
+            (IntPtr Handle, int TabIndex, bool RestoreAlt) target;
+
+            lock (_activationGate)
+            {
+                if (_pendingActivation is not { } pending)
+                {
+                    _activationPumpRunning = false;
+                    return;
+                }
+
+                target = pending;
+                _pendingActivation = null;
+            }
+
+            try
+            {
+                // 激活窗口（必要时切标签页）交给窗口宿主。队列只执行最新目标，
+                // 连续快速切换时旧请求即使慢完成，最后也会再切到最新选择。
+                await _app.WindowHost.ActivateAsync(target.Handle, target.TabIndex);
+
+                // 这个补发也得由提权进程发，否则管理员窗口收不到、Alt 会卡在按下状态。
+                if (target.RestoreAlt)
+                {
+                    await Task.Run(() => _app.WindowHost.RestoreAltKey());
+                }
+            }
+            catch
+            {
+                // WindowHost 会处理常规失败；继续处理队列里的最新目标
+            }
+        }
     }
 
     // ---------- 缩略图 ----------
@@ -648,6 +730,13 @@ internal sealed class AltTabController : IDisposable
     {
         try
         {
+            Interlocked.Increment(ref _iconLoadGeneration);
+
+            lock (_activationGate)
+            {
+                _pendingActivation = null;
+            }
+
             _active = false;
             _opening = false;
             _cancelPending = true;

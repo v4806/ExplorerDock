@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Pipes;
@@ -21,15 +22,33 @@ internal sealed class RemoteWindowHost : IWindowHost
     {
         public HostMessage Request { get; init; } = new();
         public ManualResetEventSlim Done { get; } = new(false);
+        public Exception? Error { get; set; }
+    }
+
+    private sealed class OutgoingCall
+    {
+        public HostMessage Message { get; init; } = new();
+        public long Deadline { get; init; }
     }
 
     private readonly object _pendingGate = new();
-    private readonly object _writeGate = new();
     private readonly Dictionary<int, PendingCall> _pending = new();
+    private readonly BlockingCollection<OutgoingCall> _outgoing = new(128);
+    private readonly object _snapshotGate = new();
+    private readonly AutoResetEvent _snapshotSignal = new(false);
+    private readonly object _keyStateGate = new();
+    private readonly AutoResetEvent _keyStateSignal = new(false);
 
     private NamedPipeServerStream? _server;
     private Stream? _stream;
     private Thread? _reader;
+    private Thread? _writer;
+    private Thread? _snapshotThread;
+    private Thread? _keyStateThread;
+    private SnapshotDto? _pendingSnapshot;
+    private KeyStateSnapshot? _pendingKeyState;
+    private volatile bool _snapshotStop;
+    private volatile bool _keyStateStop;
     private Process? _process;
     private int _nextId;
     private int _lastWindows = -1;
@@ -85,20 +104,42 @@ internal sealed class RemoteWindowHost : IWindowHost
 
             waiter.Start();
 
-            var info = new ProcessStartInfo(exe)
+            var taskResult = elevated
+                ? StartupRegistration.TryStartElevatedTask(exe)
+                : StartupRegistration.ScheduledHostStartResult.NotReady;
+
+            bool connected = false;
+
+            if (taskResult == StartupRegistration.ScheduledHostStartResult.LaunchAccepted)
             {
-                Arguments = "--host",
-                UseShellExecute = true,
-            };
+                AltTabController.Log("host: scheduled task launch accepted, waiting for pipe");
+            }
+            else if (taskResult == StartupRegistration.ScheduledHostStartResult.LaunchFailed)
+            {
+                AltTabController.Log("host: scheduled task launch failed, checking for an existing host");
+                connected = accepted.Wait(3000);
+            }
 
-            // 需要接管管理员程序时，功能进程才请求提权（界面进程始终普通权限）
-            if (elevated) info.Verb = "runas";
+            if (taskResult != StartupRegistration.ScheduledHostStartResult.LaunchAccepted && !connected)
+            {
+                AltTabController.Log("host: falling back to direct host launch");
 
-            _process = Process.Start(info);
+                var info = new ProcessStartInfo(exe)
+                {
+                    Arguments = "--host",
+                    UseShellExecute = true,
+                };
 
-            if (!accepted.Wait(timeoutMs))
+                // 需要接管管理员程序时，功能进程才请求提权（界面进程始终普通权限）
+                if (elevated) info.Verb = "runas";
+
+                _process = Process.Start(info);
+            }
+
+            if (!connected && !accepted.Wait(timeoutMs))
             {
                 AltTabController.Log("host: connect timed out");
+                ClosePendingServer();
                 return false;
             }
 
@@ -107,6 +148,9 @@ internal sealed class RemoteWindowHost : IWindowHost
 
             _reader = new Thread(ReadLoop) { IsBackground = true, Name = "ExplorerDock.HostClient" };
             _reader.Start();
+            StartWriter();
+            StartSnapshotWorker();
+            StartKeyStateWorker();
 
             AltTabController.Log("host: connected");
             return true;
@@ -115,8 +159,23 @@ internal sealed class RemoteWindowHost : IWindowHost
         {
             // 用户在 UAC 弹窗上点了"否"，或者进程/管道起不来
             AltTabController.Log($"host: connect failed {ex.GetType().Name}: {ex.Message}");
+            ClosePendingServer();
             return false;
         }
+    }
+
+    private void ClosePendingServer()
+    {
+        try
+        {
+            _server?.Dispose();
+        }
+        catch
+        {
+            // 忽略
+        }
+
+        _server = null;
     }
 
     // ---------- IWindowHost ----------
@@ -177,17 +236,11 @@ internal sealed class RemoteWindowHost : IWindowHost
 
     public void SetKeyState(bool altTabTakeover, bool clipboardTakeover, bool panelOpen)
     {
-        var message = new HostMessage
-        {
-            Cmd = HostProtocol.CmdKeyState,
-            TakeoverAltTab = altTabTakeover,
-            TakeoverClipboard = clipboardTakeover,
-            PanelOpen = panelOpen,
-            FullscreenPassthrough = App.Settings.AltTabFullscreenPassthrough,
-        };
-
-        // 状态推送很频繁，超时给短一点：宿主掉线时不能让界面卡住
-        if (Request(message, 800)) _keyboardInstalled = message.Ok;
+        QueueKeyState(new KeyStateSnapshot(
+            altTabTakeover,
+            clipboardTakeover,
+            panelOpen,
+            App.Settings.AltTabFullscreenPassthrough));
     }
 
     public void ReapplyNow()
@@ -201,6 +254,9 @@ internal sealed class RemoteWindowHost : IWindowHost
         var message = new HostMessage { Cmd = HostProtocol.CmdActivate, Hwnd = hwnd.ToInt64(), Tab = tabIndex };
         return Request(message) && message.Ok;
     }
+
+    public Task<bool> ActivateAsync(IntPtr hwnd, int tabIndex)
+        => Task.Run(() => Activate(hwnd, tabIndex));
 
     public void Minimize(IntPtr hwnd)
         => Request(new HostMessage { Cmd = HostProtocol.CmdMinimize, Hwnd = hwnd.ToInt64() });
@@ -263,6 +319,9 @@ internal sealed class RemoteWindowHost : IWindowHost
         return Request(message, 800) && message.Ok;
     }
 
+    public Task<bool> IsForegroundWindowAsync(IntPtr hwnd)
+        => Task.Run(() => IsForegroundWindow(hwnd));
+
     public bool IsLeftButtonDown()
     {
         var message = new HostMessage { Cmd = HostProtocol.CmdIsLeftDown };
@@ -273,6 +332,11 @@ internal sealed class RemoteWindowHost : IWindowHost
 
     public void Dispose()
     {
+        _snapshotStop = true;
+        _snapshotSignal.Set();
+        _keyStateStop = true;
+        _keyStateSignal.Set();
+
         try
         {
             Request(new HostMessage { Cmd = HostProtocol.CmdExit }, 1500);
@@ -282,6 +346,7 @@ internal sealed class RemoteWindowHost : IWindowHost
             // 忽略
         }
 
+        _outgoing.CompleteAdding();
         _connected = false;
 
         try
@@ -335,7 +400,7 @@ internal sealed class RemoteWindowHost : IWindowHost
         var message = new HostMessage { Cmd = command, Hwnd = hwnd.ToInt64() };
         if (!Request(message, 8000) || message.Cards is null) return result;
 
-        foreach (var card in message.Cards) result.Add(HostProtocol.FromDto(card));
+        foreach (var card in message.Cards) result.Add(HostProtocol.FromDto(card, loadIcon: false));
 
         return result;
     }
@@ -343,16 +408,16 @@ internal sealed class RemoteWindowHost : IWindowHost
     /// <summary>
     /// 默认等待上限：1.5 秒。
     ///
-    /// 这个等待是**在界面线程上同步做的** —— 给太长就等于"点一下冻住界面这么久"。
-    /// 宿主那边现在对卡住的操作会快速失败（见 HostRuntime 的 GUI 忙跳过），
-    /// 正常操作都是毫秒级，1.5 秒足够；真卡住时宁快速失败，也别把悬浮栏冻住。
-    /// 需要更长等待的操作（关窗口、结束进程、粘贴）都在各自方法里显式指定。
+    /// 这个等待是**在调用线程上同步做的** —— 给太长就等于"点一下冻住界面这么久"。
+    /// 宿主那边现在对卡住的操作会快速失败，正常操作都是毫秒级，1.5 秒足够；
+    /// 真卡住时宁快速失败，也别把悬浮栏冻住。
     /// </summary>
     private bool Request(HostMessage message, int timeoutMs = 1500)
     {
         var stream = _stream;
         if (stream is null || !_connected) return false;
 
+        long started = Environment.TickCount64;
         var call = new PendingCall { Request = message };
         message.Id = Interlocked.Increment(ref _nextId);
 
@@ -361,27 +426,33 @@ internal sealed class RemoteWindowHost : IWindowHost
             _pending[message.Id] = call;
         }
 
-        try
+        if (!_outgoing.TryAdd(new OutgoingCall
         {
-            lock (_writeGate)
+            Message = message,
+            Deadline = started + timeoutMs,
+        }))
+        {
+            lock (_pendingGate)
             {
-                HostProtocol.WriteLine(stream, HostProtocol.Encode(message));
+                _pending.Remove(message.Id);
             }
+
+            AltTabController.Log($"ui: write queue stopped {message.Cmd}");
+            return false;
         }
-        catch (Exception ex)
+
+        if (call.Done.Wait(timeoutMs))
         {
-            AltTabController.Log($"ui: write failed {ex.GetType().Name}: {ex.Message}");
+            if (call.Error is null) return true;
 
             lock (_pendingGate)
             {
                 _pending.Remove(message.Id);
             }
 
-            _connected = false;
+            AltTabController.Log($"ui: write failed {call.Error.GetType().Name}: {call.Error.Message}");
             return false;
         }
-
-        if (call.Done.Wait(timeoutMs)) return true;
 
         lock (_pendingGate)
         {
@@ -390,6 +461,47 @@ internal sealed class RemoteWindowHost : IWindowHost
 
         AltTabController.Log($"ui: request timeout {message.Cmd}");
         return false;
+    }
+
+    private void StartWriter()
+    {
+        if (_writer is not null) return;
+
+        _writer = new Thread(() =>
+        {
+            foreach (var outgoing in _outgoing.GetConsumingEnumerable())
+            {
+                if (Environment.TickCount64 > outgoing.Deadline)
+                {
+                    lock (_pendingGate)
+                    {
+                        _pending.Remove(outgoing.Message.Id);
+                    }
+
+                    continue;
+                }
+
+                try
+                {
+                    var stream = _stream;
+                    if (stream is null) throw new IOException("host pipe is closed");
+
+                    HostProtocol.WriteLine(stream, HostProtocol.Encode(outgoing.Message));
+                }
+                catch (Exception ex)
+                {
+                    _connected = false;
+                    FailPending(ex);
+                    continue;
+                }
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "ExplorerDock.HostWriter",
+        };
+
+        _writer.Start();
     }
 
     private async void ReadLoop()
@@ -443,26 +555,149 @@ internal sealed class RemoteWindowHost : IWindowHost
 
             if (message.Cmd == "snapshot" && message.Snapshot is not null)
             {
-                if (message.Snapshot.Windows.Count != _lastWindows)
+                QueueSnapshot(message.Snapshot);
+            }
+        }
+
+        AltTabController.Log("ui: read loop end");
+        FailPending(new IOException("host pipe closed"));
+        _connected = false;
+    }
+
+    private void FailPending(Exception error)
+    {
+        List<PendingCall> calls;
+
+        lock (_pendingGate)
+        {
+            calls = _pending.Values.ToList();
+            _pending.Clear();
+        }
+
+        foreach (var call in calls)
+        {
+            call.Error = error;
+            call.Done.Set();
+        }
+    }
+
+    private void StartSnapshotWorker()
+    {
+        if (_snapshotThread is not null) return;
+
+        _snapshotThread = new Thread(() =>
+        {
+            while (true)
+            {
+                _snapshotSignal.WaitOne();
+
+                SnapshotDto? dto;
+
+                lock (_snapshotGate)
                 {
-                    _lastWindows = message.Snapshot.Windows.Count;
+                    dto = _pendingSnapshot;
+                    _pendingSnapshot = null;
+                }
+
+                if (dto is null)
+                {
+                    if (_snapshotStop) return;
+                    continue;
+                }
+
+                if (dto.Windows.Count != _lastWindows)
+                {
+                    _lastWindows = dto.Windows.Count;
                     AltTabController.Log($"ui: snapshot windows={_lastWindows}");
                 }
 
                 try
                 {
-                    SnapshotUpdated?.Invoke(HostProtocol.FromDto(message.Snapshot));
+                    SnapshotUpdated?.Invoke(HostProtocol.FromDto(dto));
                 }
                 catch (Exception ex)
                 {
                     AltTabController.Log($"ui: snapshot apply failed {ex.GetType().Name}: {ex.Message}");
                 }
             }
+        })
+        {
+            IsBackground = true,
+            Name = "ExplorerDock.SnapshotApply",
+        };
+
+        _snapshotThread.Start();
+    }
+
+    private void QueueSnapshot(SnapshotDto snapshot)
+    {
+        lock (_snapshotGate)
+        {
+            _pendingSnapshot = snapshot;
         }
 
-        AltTabController.Log("ui: read loop end");
-        _connected = false;
+        _snapshotSignal.Set();
     }
+
+    private void StartKeyStateWorker()
+    {
+        if (_keyStateThread is not null) return;
+
+        _keyStateThread = new Thread(() =>
+        {
+            while (true)
+            {
+                _keyStateSignal.WaitOne();
+
+                KeyStateSnapshot? state;
+
+                lock (_keyStateGate)
+                {
+                    state = _pendingKeyState;
+                    _pendingKeyState = null;
+                }
+
+                if (state is null)
+                {
+                    if (_keyStateStop) return;
+                    continue;
+                }
+
+                var message = new HostMessage
+                {
+                    Cmd = HostProtocol.CmdKeyState,
+                    TakeoverAltTab = state.AltTabTakeover,
+                    TakeoverClipboard = state.ClipboardTakeover,
+                    PanelOpen = state.PanelOpen,
+                    FullscreenPassthrough = state.FullscreenPassthrough,
+                };
+
+                if (Request(message, 800)) _keyboardInstalled = message.Ok;
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "ExplorerDock.KeyState",
+        };
+
+        _keyStateThread.Start();
+    }
+
+    private void QueueKeyState(KeyStateSnapshot state)
+    {
+        lock (_keyStateGate)
+        {
+            _pendingKeyState = state;
+        }
+
+        _keyStateSignal.Set();
+    }
+
+    private sealed record KeyStateSnapshot(
+        bool AltTabTakeover,
+        bool ClipboardTakeover,
+        bool PanelOpen,
+        bool FullscreenPassthrough);
 
     /// <summary>把回复内容拷回请求对象（调用方拿的就是它）。</summary>
     private static void CopyReply(HostMessage reply, HostMessage request)

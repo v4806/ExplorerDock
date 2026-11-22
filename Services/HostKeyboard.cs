@@ -45,12 +45,16 @@ internal sealed class HostKeyboard : IDisposable
 
     public void SetState(bool altTabTakeover, bool clipboardTakeover, bool panelOpen, bool fullscreenPassthrough)
     {
+        // Alt 仍按着时，旧的 panelOpen=false 不能把刚由 Tab 按键置位的接管状态清掉。
+        // 否则状态推送即使只延迟几毫秒，Alt 抬起也会漏掉提交。
+        bool keepArmedAltPanel = !panelOpen && _altDown && _panelOpen;
+
         // 记住"面板是什么时候开始接管的"：ESC 的吞噬要有个时间兜底，见 OnKey 里那一支
         if (panelOpen && !_panelOpen) _panelOpenedAt = DateTime.UtcNow;
 
         _altTabTakeover = altTabTakeover;
         _clipboardTakeover = clipboardTakeover;
-        _panelOpen = panelOpen;
+        if (!keepArmedAltPanel) _panelOpen = panelOpen;
         _fullscreenPassthrough = fullscreenPassthrough;
     }
 
@@ -104,6 +108,8 @@ internal sealed class HostKeyboard : IDisposable
                 // 就再没人补发，Alt 会卡在按下状态（键盘错乱，退出程序也不会自愈）。
                 NativeMethods.RestoreAltKeyState();
 
+                _panelOpen = false;
+                _panelOpenedAt = DateTime.MinValue;
                 _notify(HostProtocol.KeyCommit);
                 return true;
 
@@ -119,6 +125,7 @@ internal sealed class HostKeyboard : IDisposable
 
                 if (stroke.Down)
                 {
+                    ArmPanelOpen();
                     _notify(_shiftDown ? HostProtocol.KeyAdvanceBack : HostProtocol.KeyAdvance);
                 }
 
@@ -131,6 +138,7 @@ internal sealed class HostKeyboard : IDisposable
 
                 if (stroke.Down)
                 {
+                    ArmPanelOpen();
                     _notify(_shiftDown ? HostProtocol.KeyAdvanceProcessBack : HostProtocol.KeyAdvanceProcess);
                 }
 
@@ -150,6 +158,18 @@ internal sealed class HostKeyboard : IDisposable
             default:
                 return false;
         }
+    }
+
+    /// <summary>
+    /// 第一次吞下切换键时先在本进程里认定面板已开始接管。
+    /// 这样界面侧同步/异步推送 panelOpen 状态的时代差异不会漏掉紧接着的 Alt 抬起。
+    /// </summary>
+    private void ArmPanelOpen()
+    {
+        if (_panelOpen) return;
+
+        _panelOpenedAt = DateTime.UtcNow;
+        _panelOpen = true;
     }
 
     private bool HandleClipboard(KeyStroke stroke)

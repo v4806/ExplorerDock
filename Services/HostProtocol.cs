@@ -297,7 +297,7 @@ internal static class HostProtocol
         return dto;
     }
 
-    public static AltTabWindowInfo FromDto(CardDto dto)
+    public static AltTabWindowInfo FromDto(CardDto dto, bool loadIcon = true)
     {
         var cells = new List<AltTabPreviewCell>(dto.Cells.Count);
 
@@ -318,7 +318,7 @@ internal static class HostProtocol
             Cells = cells,
 
             // 图标在界面进程这边按窗口句柄取（跨权限拿不到时自然降级）
-            Icon = Interop.ShellInterop.GetWindowIcon(handle),
+            Icon = loadIcon ? Interop.ShellInterop.GetWindowIcon(handle) : null,
         };
     }
 

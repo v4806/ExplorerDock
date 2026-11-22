@@ -31,9 +31,6 @@ internal sealed class ClipboardPanel : Window
     private const double ImageItemHeight = 96;
     private const double ThumbWidth = 176;
 
-    /// <summary>面板一打开就同步加载缩略图的条数，其余交给异步队列慢慢补。</summary>
-    private const int SyncThumbnailCount = 8;
-
     private const int MaxThumbnailCache = 30;
 
     private readonly ClipboardStore _store;
@@ -121,6 +118,7 @@ internal sealed class ClipboardPanel : Window
 
     /// <summary>面板这次显示的时间点（刚弹出的宽限期内不做"已离开"判断）。</summary>
     private long _shownAt;
+    private bool _foregroundCheckInFlight;
 
     /// <summary>左侧栏里能当作"拖放分组目标"的一行（GroupId 为 null 表示未分组）。</summary>
     private sealed class SidebarDropTarget
@@ -162,6 +160,10 @@ internal sealed class ClipboardPanel : Window
     private readonly List<ItemVisual> _visuals = new();
     private readonly Dictionary<string, ImageSource> _thumbnailCache = new();
     private readonly List<string> _thumbnailCacheOrder = new();
+    private readonly Dispatcher _dispatcher;
+    private readonly SemaphoreSlim _thumbnailGate = new(2);
+    private int _thumbnailGeneration;
+    private volatile bool _cleanedUp;
     private bool _showFavorites;
     private bool _suppressDeactivate;
     private int _selected = -1;
@@ -175,6 +177,7 @@ internal sealed class ClipboardPanel : Window
     public ClipboardPanel(ClipboardStore store)
     {
         _store = store;
+        _dispatcher = Dispatcher.CurrentDispatcher;
 
         WindowStyle = WindowStyle.None;
         AllowsTransparency = true;
@@ -432,7 +435,7 @@ internal sealed class ClipboardPanel : Window
     }
 
     /// <summary>前台已经不是面板了就把面板收起来（兜住 Deactivated 没来的情况）。</summary>
-    private void WatchForeground()
+    private async void WatchForeground()
     {
         if (!IsVisible)
         {
@@ -452,10 +455,38 @@ internal sealed class ClipboardPanel : Window
         // 自己不能判断：普通权限的界面进程调 GetForegroundWindow 会返回 0
         // （实测日志里就是 foreground=0），必须问提权进程
         if (Application.Current is not App app) return;
-        if (app.WindowHost.IsForegroundWindow(handle)) return;
+        if (_foregroundCheckInFlight) return;
+
+        long shownAt = _shownAt;
+        _foregroundCheckInFlight = true;
+        bool foreground = false;
+
+        try
+        {
+            // 宿主可能正忙；本轮最多等 800ms，但不能占住 WPF 线程。
+            foreground = await app.WindowHost.IsForegroundWindowAsync(handle);
+        }
+        catch
+        {
+            // 查询失败就留到下一轮，不能因为这个异步异常关掉整个程序
+        }
+        finally
+        {
+            _foregroundCheckInFlight = false;
+        }
+
+        if (!ShouldHideAfterForegroundCheck(foreground, IsVisible, _shownAt == shownAt)) return;
 
         Services.ClipboardMonitor.Log("foreground watch -> hide panel");
         HidePanel();
+    }
+
+    internal static bool ShouldHideAfterForegroundCheck(
+        bool panelIsForeground,
+        bool panelIsVisible,
+        bool samePresentation)
+    {
+        return panelIsVisible && samePresentation && !panelIsForeground;
     }
 
     /// <summary>某条记录被点击（调用方负责写回剪贴板并粘贴）。</summary>
@@ -564,33 +595,50 @@ internal sealed class ClipboardPanel : Window
         if (!IsVisible) Show();
         KeepOnTop();
 
-        // 抢前台交给功能进程（提权）去做：界面进程现在是普通权限，跨权限时
-        // SetForegroundWindow / AttachThreadInput 会被系统拒掉，面板根本拿不到前台
-        // —— 表现就是"呼出后一下子又自己关了"。
         var handle = new WindowInteropHelper(this).Handle;
-        if (handle != IntPtr.Zero) (Application.Current as App)?.WindowHost.Activate(handle, -1);
 
-        // 抢到"前台窗口"还不够：按键消息发给的是**线程焦点窗口**，
-        // 跨进程抢焦点时这两个不一定是同一个窗口，必须再把键盘焦点落到面板上，
-        // 否则面板看着是前台的，按什么都没反应。
+        _shownAt = Environment.TickCount64;
+
+        if (handle != IntPtr.Zero) _ = ActivatePanelAsync(handle, _shownAt);
+        else _suppressDeactivate = false;
+
+        Services.ClipboardMonitor.Log($"panel handle={handle} foreground={NativeMethods.GetForegroundWindow()} focus={NativeMethods.GetFocus()} active={IsActive}");
+    }
+
+    private async Task ActivatePanelAsync(IntPtr handle, long shownAt)
+    {
+        try
+        {
+            // 抢前台交给提权进程。放到后台后，Show() 先完成首帧，不再冻住整个 Dispatcher。
+            if (Application.Current is App app)
+            {
+                await app.WindowHost.ActivateAsync(handle, -1);
+            }
+        }
+        catch
+        {
+            // 激活失败时面板仍可点击；前台轮询会负责在用户离开后收起
+        }
+
+        if (!IsVisible || _shownAt != shownAt) return;
+
+        // 抢到"前台窗口"还不够：按键消息发给的是线程焦点窗口，跨进程抢焦点时两者不一定相同。
         Focus();
         Keyboard.Focus(this);
         NativeMethods.SetFocus(handle);
 
-        // 再把焦点落到搜索框上：面板一弹出就能直接打字过滤。
-        // ↑↓/回车/Esc 由窗口的 PreviewKeyDown（隧道事件，先于输入框）统一处理，
-        // 所以列表的键盘操作不会因为焦点在输入框里而失效。
         _searchBox.Focus();
         Keyboard.Focus(_searchBox);
 
-        // 等这一轮消息彻底处理完再恢复"失活即隐藏"，跳过显示瞬间的那次伪失活
-        Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(() => _suppressDeactivate = false));
-
         // 同时盯住前台：失活事件在某些点击路径下不一定送达
-        _shownAt = Environment.TickCount64;
         _foregroundWatch.Start();
 
-        Services.ClipboardMonitor.Log($"panel handle={handle} foreground={NativeMethods.GetForegroundWindow()} focus={NativeMethods.GetFocus()} active={IsActive}");
+        _ = Dispatcher.BeginInvoke(
+            DispatcherPriority.ApplicationIdle,
+            new Action(() =>
+            {
+                if (_shownAt == shownAt) _suppressDeactivate = false;
+            }));
     }
 
     /// <summary>
@@ -682,6 +730,9 @@ internal sealed class ClipboardPanel : Window
     /// </summary>
     internal void Cleanup()
     {
+        _cleanedUp = true;
+        Interlocked.Increment(ref _thumbnailGeneration);
+
         try
         {
             _store.Changed -= OnStoreChanged;
@@ -805,6 +856,8 @@ internal sealed class ClipboardPanel : Window
 
     private void Refresh()
     {
+        int thumbnailGeneration = Interlocked.Increment(ref _thumbnailGeneration);
+
         BuildTabs();
         BuildSidebar();
 
@@ -850,9 +903,7 @@ internal sealed class ClipboardPanel : Window
         // 列表重建后把选中态补回来（否则重建一次高亮就没了）
         if (_selected >= 0 && _selected < _visuals.Count) ApplyItemTone(_visuals[_selected], true);
 
-        // 前几条**同步**加载缩略图：面板一打开就该看见图。
-        // 之前全丢给异步队列，而列表一刷新就把队列里没跑完的任务作废了 ——
-        // 表现就是"第一次打开没图、第二次打开才有"。
+        // 缩略图读取、解密和解码全部放到后台；缓存命中时 LoadThumbnail 会当场填图。
         for (int i = 0; i < _visuals.Count; i++)
         {
             var visual = _visuals[i];
@@ -866,8 +917,7 @@ internal sealed class ClipboardPanel : Window
                 continue;
             }
 
-            if (i < SyncThumbnailCount) LoadThumbnail(visual);
-            else Dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() => LoadThumbnail(visual)));
+            LoadThumbnail(visual, thumbnailGeneration);
         }
     }
 
@@ -1241,8 +1291,10 @@ internal sealed class ClipboardPanel : Window
         // 光标还在面板自己身上时不算"悬停到别的东西上"
         if (IsPointOnSelf(point.X, point.Y)) return;
 
+        if (Application.Current is not App app) return;
+
         // 1) 悬浮栏上的文件夹按钮（用户要求：和任务栏一样，悬停就呼出那个文件夹窗口）
-        if (Application.Current is App app && app.TryActivateDockItemAt(point.X, point.Y)) return;
+        if (app.TryActivateDockItemAt(point.X, point.Y)) return;
 
         // 2) 任务栏上的任务按钮
         var under = NativeMethods.WindowFromPoint(point);
@@ -1283,7 +1335,7 @@ internal sealed class ClipboardPanel : Window
         Services.ClipboardMonitor.Log($"taskbar hover -> activate hwnd={target} title='{title}'");
 
         // 激活别的程序窗口交给窗口宿主：目标是管理员程序时不提权切不过去
-        (Application.Current as App)?.WindowHost.Activate(target, -1);
+        _ = app.WindowHost.ActivateAsync(target, -1);
     }
 
     /// <summary>屏幕坐标是不是落在面板自己身上。</summary>
@@ -1748,105 +1800,143 @@ internal sealed class ClipboardPanel : Window
         return null;
     }
 
-    private void LoadThumbnail(ItemVisual visual)
+    private void LoadThumbnail(ItemVisual visual, int generation)
     {
-        if (visual.ThumbnailLoaded) return;
-
-        // 列表被重建过：这个视觉对象已经不在界面上了，放弃
+        if (_cleanedUp || visual.ThumbnailLoaded || visual.ThumbnailLoading) return;
+        if (generation != Volatile.Read(ref _thumbnailGeneration)) return;
         if (visual.Root.Parent is null) return;
 
-        try
+        if (_thumbnailCache.TryGetValue(visual.Item.Id, out var cached))
         {
-            if (_thumbnailCache.TryGetValue(visual.Item.Id, out var cached))
-            {
-                visual.Thumbnail.Source = cached;
-                visual.ThumbnailLoaded = true;
-                visual.Meta.Text = Describe(visual.Item);
-                return;
-            }
-
-            var raw = _store.GetImageBytes(visual.Item);
-            var isHtmlPreview = false;
-
-            if (raw is null)
-            {
-                // 文件类条目：是图片/视频就直接拿系统缩略图 ——
-                // 视频会给首帧、图片会给预览图，让它们以媒体该有的样子显示
-                if (visual.Item.Kind == ClipKind.Files)
-                {
-                    var media = FirstMediaFile(visual.Item);
-                    var fileThumb = media is null ? null : ShellThumbnail.Get(media, (int)(ThumbWidth * 2));
-
-                    if (fileThumb is not null)
-                    {
-                        visual.Thumbnail.Source = fileThumb;
-                        CacheThumbnail(visual.Item.Id, fileThumb);
-                    }
-
-                    visual.ThumbnailLoaded = true;
-                    visual.Meta.Text = Describe(visual.Item);
-                    return;
-                }
-
-                // 剪贴板上没有位图格式（QQ 复制图文）：用从 HTML 里抠出来的那张图当缩略图
-                raw = _store.GetPreviewBytes(visual.Item);
-                isHtmlPreview = raw is not null;
-            }
-
-            if (raw is null)
-            {
-                // 别的办法都拿不到图了：交给隐藏的浏览器内核去渲染这份网页内容
-                RequestHtmlPreview(visual);
-                return;
-            }
-
-            var format = visual.Item.ImageFormat ?? "DIB";
-            ImageSource? source;
-
-            if (isHtmlPreview)
-            {
-                // 抠出来的是 HTML 里嵌的 PNG/JPEG 原始字节，直接解
-                visual.Item.MeasuredSize ??= DibTools.ReadPngSizeText(raw);
-                source = DecodeThumbnail(raw);
-            }
-            else if (string.Equals(format, "EMF", StringComparison.OrdinalIgnoreCase))
-            {
-                // 矢量图元文件：WPF 不认，借 GDI+ 画一张预览图；存储的仍是原始 EMF 字节
-                if (DibTools.TryReadEmfSize(raw, out int emfWidth, out int emfHeight))
-                {
-                    visual.Item.MeasuredSize = $"{emfWidth}×{emfHeight}";
-                }
-
-                source = DibTools.RenderEmfThumbnail(raw, (int)ThumbWidth);
-            }
-            else if (string.Equals(format, "PNG", StringComparison.OrdinalIgnoreCase))
-            {
-                visual.Item.MeasuredSize = DibTools.ReadPngSizeText(raw);
-                source = DecodeThumbnail(raw);
-            }
-            else
-            {
-                if (DibTools.TryReadHeader(raw, out int width, out int height, out _, out _, out _))
-                {
-                    visual.Item.MeasuredSize = $"{Math.Abs(width)}×{Math.Abs(height)}";
-                }
-
-                var bmp = DibTools.WrapAsBmp(raw);
-                source = bmp is null ? null : DecodeThumbnail(bmp);
-            }
-
-            visual.Meta.Text = Describe(visual.Item);
-
-            if (source is null) return;
-
-            visual.Thumbnail.Source = source;
+            visual.Thumbnail.Source = cached;
             visual.ThumbnailLoaded = true;
-            CacheThumbnail(visual.Item.Id, source);
+            visual.Meta.Text = Describe(visual.Item);
+            return;
         }
-        catch
+
+        var item = visual.Item;
+        visual.ThumbnailLoading = true;
+
+        _ = Task.Run(async () =>
         {
-            // 解不出来就只显示文字，不影响其他功能
+            var result = default(ThumbnailLoadResult);
+
+            await _thumbnailGate.WaitAsync().ConfigureAwait(false);
+
+            try
+            {
+                if (_cleanedUp || generation != Volatile.Read(ref _thumbnailGeneration)) return;
+                try
+                {
+                    result = LoadThumbnailCore(item);
+                }
+                catch
+                {
+                    // 解不出来就显示文字；回到 UI 线程释放 loading 状态
+                }
+            }
+            finally
+            {
+                _thumbnailGate.Release();
+            }
+
+            try
+            {
+                _ = _dispatcher.BeginInvoke(new Action(() => ApplyThumbnail(visual, generation, result)));
+            }
+            catch
+            {
+                // 面板/程序正在退出
+            }
+        });
+    }
+
+    private void ApplyThumbnail(ItemVisual visual, int generation, ThumbnailLoadResult result)
+    {
+        visual.ThumbnailLoading = false;
+
+        if (_cleanedUp || generation != Volatile.Read(ref _thumbnailGeneration)) return;
+        if (visual.Root.Parent is null) return;
+
+        if (result.MeasuredSize is not null) visual.Item.MeasuredSize = result.MeasuredSize;
+        visual.Meta.Text = Describe(visual.Item);
+
+        if (result.Source is null)
+        {
+            if (result.NeedsHtmlPreview) RequestHtmlPreview(visual);
+            return;
         }
+
+        visual.Thumbnail.Source = result.Source;
+        visual.ThumbnailLoaded = true;
+        CacheThumbnail(visual.Item.Id, result.Source);
+    }
+
+    private ThumbnailLoadResult LoadThumbnailCore(ClipItem item)
+    {
+        var raw = _store.GetImageBytes(item);
+        bool isHtmlPreview = false;
+
+        if (raw is null)
+        {
+            // 文件类条目：是图片/视频就直接拿系统缩略图。
+            if (item.Kind == ClipKind.Files)
+            {
+                var media = FirstMediaFile(item);
+                var fileThumb = media is null
+                    ? null
+                    : BoundedCall.Run(
+                        $"clipboard-thumb:{item.Id}",
+                        2000,
+                        () => (ImageSource?)ShellThumbnail.Get(media, (int)(ThumbWidth * 2)),
+                        null,
+                        "clipboard: file thumbnail",
+                        sta: true);
+                return new ThumbnailLoadResult(fileThumb, null, false);
+            }
+
+            // 剪贴板上没有位图格式（QQ/微信复制图文）：用 HTML 里抠出的预览图。
+            raw = _store.GetPreviewBytes(item);
+            isHtmlPreview = raw is not null;
+        }
+
+        if (raw is null) return new ThumbnailLoadResult(null, null, true);
+
+        var format = item.ImageFormat ?? "DIB";
+        string? measuredSize = null;
+        ImageSource? source;
+
+        if (isHtmlPreview)
+        {
+            measuredSize = DibTools.ReadPngSizeText(raw);
+            source = DecodeThumbnail(raw);
+        }
+        else if (string.Equals(format, "EMF", StringComparison.OrdinalIgnoreCase))
+        {
+            if (DibTools.TryReadEmfSize(raw, out int emfWidth, out int emfHeight))
+            {
+                measuredSize = $"{emfWidth}×{emfHeight}";
+            }
+
+            source = DibTools.RenderEmfThumbnail(raw, (int)ThumbWidth);
+        }
+        else if (string.Equals(format, "PNG", StringComparison.OrdinalIgnoreCase))
+        {
+            measuredSize = DibTools.ReadPngSizeText(raw);
+            source = DecodeThumbnail(raw);
+        }
+        else
+        {
+            if (DibTools.TryReadHeader(raw, out int width, out int height, out _, out _, out _))
+            {
+                measuredSize = $"{Math.Abs(width)}×{Math.Abs(height)}";
+            }
+
+            var bmp = DibTools.WrapAsBmp(raw);
+            source = bmp is null ? null : DecodeThumbnail(bmp);
+        }
+
+        return new ThumbnailLoadResult(source, measuredSize, false);
     }
 
     /// <summary>
@@ -2583,6 +2673,11 @@ internal sealed class ClipboardPanel : Window
 
     private static SolidColorBrush NewBrush(byte a, byte r, byte g, byte b) => new(Color.FromArgb(a, r, g, b));
 
+    private readonly record struct ThumbnailLoadResult(
+        ImageSource? Source,
+        string? MeasuredSize,
+        bool NeedsHtmlPreview);
+
     private sealed class ItemVisual
     {
         public ItemVisual(ClipItem item, Border root, Border thumbHost, TextBlock preview, Image thumbnail, TextBlock meta, TextBlock star, double height)
@@ -2615,6 +2710,8 @@ internal sealed class ClipboardPanel : Window
         public double Height { get; }
 
         public bool ThumbnailLoaded { get; set; }
+
+        public bool ThumbnailLoading { get; set; }
     }
 }
 

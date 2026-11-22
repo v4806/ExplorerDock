@@ -42,7 +42,9 @@ internal sealed class SetupWizardWindow : Window
     private int _step;
 
     /// <summary>管理员权限这一项要等向导收尾才应用，所以先记在本地。</summary>
-    private bool _runElevated = true;
+    private bool _runElevated = ResolveInitialRunElevated(
+        App.Settings.SetupCompleted,
+        App.Settings.RunElevated);
 
     public SetupWizardWindow(App app)
     {
@@ -375,7 +377,7 @@ internal sealed class SetupWizardWindow : Window
 
         startup.Children.Add(BuildToggle(
             "以管理员身份运行",
-            "有些程序是用管理员身份打开的，本软件也得用管理员身份，才能显示它们的窗口画面、用 Alt+Tab 切换。打开后每次开机，系统会问一次是否允许。",
+            "有些程序是用管理员身份打开的，管理员功能需要单独的 Host 进程才能显示它们的窗口画面、用 Alt+Tab 切换。界面本身始终保持普通权限，首次启用时系统会询问一次。",
             _runElevated,
             v => _runElevated = v,
             next => next || ShowElevatedWarning()));
@@ -386,7 +388,7 @@ internal sealed class SetupWizardWindow : Window
         done.Children.Add(Paragraph("设置已经生效，悬浮栏会马上按新的设置显示。"));
         done.Children.Add(Paragraph("要修改时，右键悬浮栏左边的 ⠿ 把手，选「设置向导…」就能重新打开。"));
         done.Children.Add(Paragraph(
-            "「以管理员身份运行」还勾着的话，点完成之后系统会问一次是否允许，同意后软件会重新启动。",
+            "运行权限有变化时，点完成后软件会以普通权限重新启动；首次启动管理员 Host 时，系统会询问一次是否允许。",
             true));
         yield return done;
     }
@@ -695,6 +697,8 @@ internal sealed class SetupWizardWindow : Window
 
     private void Finish()
     {
+        bool previousRunElevated = App.Settings.RunElevated;
+
         App.Settings.SetupCompleted = true;
         App.Settings.RunElevated = _runElevated;
         App.Settings.Save();
@@ -704,13 +708,22 @@ internal sealed class SetupWizardWindow : Window
 
         Close();
 
-        if (_runElevated && !App.IsElevated)
-        {
-            _app.RestartElevated();
-        }
-        else if (!_runElevated && App.IsElevated)
+        if (ShouldRestartNormal(App.IsElevated, previousRunElevated, _runElevated))
         {
             _app.RestartNormal();
         }
+    }
+
+    internal static bool ShouldRestartNormal(
+        bool uiElevated,
+        bool previousRunElevated,
+        bool selectedRunElevated)
+    {
+        return uiElevated || previousRunElevated != selectedRunElevated;
+    }
+
+    internal static bool ResolveInitialRunElevated(bool setupCompleted, bool runElevated)
+    {
+        return setupCompleted ? runElevated : true;
     }
 }

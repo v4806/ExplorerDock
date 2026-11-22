@@ -86,6 +86,9 @@ public interface IWindowHost : IDisposable
     /// <summary>激活窗口并切到指定标签页（tabIndex &lt; 0 表示整窗）。</summary>
     bool Activate(IntPtr hwnd, int tabIndex);
 
+    /// <summary>不阻塞调用线程的激活。本地实现会回到 WPF 线程，远程实现在线程池等宿主回复。</summary>
+    Task<bool> ActivateAsync(IntPtr hwnd, int tabIndex);
+
     /// <summary>最小化窗口。</summary>
     void Minimize(IntPtr hwnd);
 
@@ -148,6 +151,9 @@ public interface IWindowHost : IDisposable
     /// （自己线程的输入队列里没有前台窗口），拿它做判断必然误判。
     /// </summary>
     bool IsForegroundWindow(IntPtr hwnd);
+
+    /// <summary>不阻塞调用线程的前台查询。</summary>
+    Task<bool> IsForegroundWindowAsync(IntPtr hwnd);
 
     /// <summary>
     /// 鼠标左键现在是不是还按着。

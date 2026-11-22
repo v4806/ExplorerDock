@@ -179,6 +179,7 @@ internal sealed class AltTabOverlay : Window
     public void Present(IReadOnlyList<AltTabWindowInfo> items, int selected)
     {
         _palette = ThemePalette.Resolve();
+        _selected = -1;
         _cursorArmed = false;   // 每次弹出都重新等一次"鼠标真的动了"
         BuildCards(items);
         ApplyTone();
@@ -229,11 +230,23 @@ internal sealed class AltTabOverlay : Window
 
     public void SetSelection(int index)
     {
+        if (_selected == index) return;
+
+        int previous = _selected;
         _selected = index;
 
-        for (int i = 0; i < _cards.Count; i++)
+        if (previous >= 0 && previous < _cards.Count)
         {
-            _cards[i].Apply(_cardNormal, _cardSelected, _selectedBorderBrush, _textBrush, _onActiveTextBrush, _thumbBack, _chipBrush, i == index);
+            _cards[previous].Apply(
+                _cardNormal, _cardSelected, _selectedBorderBrush, _textBrush,
+                _onActiveTextBrush, _thumbBack, _chipBrush, false);
+        }
+
+        if (index >= 0 && index < _cards.Count)
+        {
+            _cards[index].Apply(
+                _cardNormal, _cardSelected, _selectedBorderBrush, _textBrush,
+                _onActiveTextBrush, _thumbBack, _chipBrush, true);
         }
     }
 
@@ -322,6 +335,17 @@ internal sealed class AltTabOverlay : Window
     public void Dismiss()
     {
         if (IsVisible) Hide();
+    }
+
+    /// <summary>窗口图标在后台取完后补到已经显示的卡片上，不阻塞首帧。</summary>
+    public void ApplyIcons(IReadOnlyList<AltTabWindowInfo> items)
+    {
+        int count = Math.Min(_cards.Count, items.Count);
+
+        for (int i = 0; i < count; i++)
+        {
+            _cards[i].ApplyIcon(items[i].Icon);
+        }
     }
 
     /// <summary>
@@ -541,7 +565,8 @@ internal sealed class AltTabOverlay : Window
 
         // 预览区：合并卡按网格摆组内各窗口，普通卡就是一格
         var cells = new List<ThumbCell>();
-        var preview = BuildPreview(info, cells);
+        var fallbackIcons = new List<Image>();
+        var preview = BuildPreview(info, cells, fallbackIcons);
 
         var layout = new Grid();
         layout.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -585,14 +610,14 @@ internal sealed class AltTabOverlay : Window
             e.Handled = true;
         };
 
-        return new CardVisual(info.Handle, root, title, badge, badgeText, cells);
+        return new CardVisual(info.Handle, root, icon, fallbackIcons, title, badge, badgeText, cells);
     }
 
     /// <summary>
     /// 预览区网格：n 个窗口排成 ceil(sqrt(n)) 列，最多 3×3 格，顺序就是 Z 序
     /// （左上角是最后活动过的那个窗口，也就是这张卡真正会切过去的窗口）。
     /// </summary>
-    private Grid BuildPreview(AltTabWindowInfo info, List<ThumbCell> cells)
+    private Grid BuildPreview(AltTabWindowInfo info, List<ThumbCell> cells, List<Image> fallbackIcons)
     {
         var preview = new Grid
         {
@@ -631,6 +656,7 @@ internal sealed class AltTabOverlay : Window
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center,
             };
+            fallbackIcons.Add(fallback);
 
             var cell = new Border
             {
@@ -695,11 +721,23 @@ internal sealed class AltTabOverlay : Window
         private readonly TextBlock _title;
         private readonly Border? _badge;
         private readonly TextBlock? _badgeText;
+        private readonly Image _icon;
+        private readonly List<Image> _fallbackIcons;
 
-        public CardVisual(IntPtr handle, Border root, TextBlock title, Border? badge, TextBlock? badgeText, List<ThumbCell> cells)
+        public CardVisual(
+            IntPtr handle,
+            Border root,
+            Image icon,
+            List<Image> fallbackIcons,
+            TextBlock title,
+            Border? badge,
+            TextBlock? badgeText,
+            List<ThumbCell> cells)
         {
             Handle = handle;
             Root = root;
+            _icon = icon;
+            _fallbackIcons = fallbackIcons;
             _title = title;
             _badge = badge;
             _badgeText = badgeText;
@@ -712,6 +750,12 @@ internal sealed class AltTabOverlay : Window
 
         /// <summary>预览格（合并卡有多个）：DWM 的实时缩略图会盖在这些格子上（宿主窗口压在面板上面）。</summary>
         public List<ThumbCell> Cells { get; }
+
+        public void ApplyIcon(ImageSource? icon)
+        {
+            _icon.Source = icon;
+            foreach (var fallback in _fallbackIcons) fallback.Source = icon;
+        }
 
         public void Apply(Brush normal, Brush selected, Brush accent, Brush text, Brush onSelectedText, Brush thumbBack, Brush chip, bool isSelected)
         {

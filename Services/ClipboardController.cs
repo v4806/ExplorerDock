@@ -133,23 +133,49 @@ internal sealed class ClipboardController : IDisposable
 
         if (origin == IntPtr.Zero || !NativeMethods.IsWindow(origin)) return;
 
-        // 面板抢过焦点，这里把前台还给用户原来的窗口
-        _app.WindowHost.Activate(origin, -1);
+        _ = ActivateThenPasteAsync(origin, clickStarted, clipboardWritten);
+    }
+
+    private async Task ActivateThenPasteAsync(IntPtr origin, long clickStarted, long clipboardWritten)
+    {
+        try
+        {
+            // 跨进程激活可能要等宿主处理，放到后台，先把 WPF 线程还给面板收起的布局与重绘。
+            if (!await _app.WindowHost.ActivateAsync(origin, -1).ConfigureAwait(false)) return;
+        }
+        catch
+        {
+            // WindowHost 自身会吞掉常规失败；这里只保证粘贴调度继续走日志路径
+            return;
+        }
+
+        if (_disposed) return;
+
         long activated = Environment.TickCount64;
+        bool sent = false;
 
         // 切前台是异步的：稍等再补 Ctrl+V。不能再用 WPF DispatcherTimer：
         // 它在 Background 优先级上，会被面板隐藏后的布局/渲染队列饿住，日志里实测会拖到 2-3 秒。
-        _ = ClipboardPasteScheduler.SendAsync(TimeSpan.FromMilliseconds(120), () =>
+        await ClipboardPasteScheduler.SendAsync(TimeSpan.FromMilliseconds(120), () =>
         {
             if (_disposed) return;
+            if (!_app.WindowHost.IsForegroundWindowAsync(origin).GetAwaiter().GetResult())
+            {
+                ClipboardMonitor.Log($"paste aborted: 0x{origin.ToInt64():X} 不再是前台");
+                return;
+            }
+
             _app.WindowHost.SendPaste();
+            sent = true;
         }, elapsed =>
         {
+            if (!sent) return;
+
             ClipboardMonitor.Log(
                 $"paste sent: click->{activated - clickStarted}ms, " +
                 $"write={clipboardWritten - clickStarted}ms, " +
                 $"activate={activated - clipboardWritten}ms, schedule={elapsed}ms");
-        });
+        }).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -176,23 +202,45 @@ internal sealed class ClipboardController : IDisposable
 
         Panel.HidePanel();
 
-        // 面板刚才是前台，把前台还给落点窗口，否则后续的点击和 Ctrl+V 会打到我们自己身上
-        _app.WindowHost.Activate(target, -1);
+        _ = ActivateThenClickAsync(target);
+    }
+
+    private async Task ActivateThenClickAsync(IntPtr target)
+    {
+        try
+        {
+            // 面板刚才是前台，把前台还给落点窗口，否则后续点击和 Ctrl+V 会打到我们自己身上。
+            if (!await _app.WindowHost.ActivateAsync(target, -1)) return;
+        }
+        catch
+        {
+            // WindowHost 会处理常规失败
+            return;
+        }
+
+        if (_disposed) return;
 
         // 目标窗口虽然到了前台，但它的输入框不一定拿到了焦点（QQ 这类尤其明显），
         // 所以先在落点补一次真实点击，再把 Ctrl+V 递进去
         var click = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(80) };
-        click.Tick += (_, _) =>
+        click.Tick += async (_, _) =>
         {
             click.Stop();
 
-            if (NativeMethods.GetCursorPos(out var point)) _app.WindowHost.ClickAtCursor();
+            if (!await _app.WindowHost.IsForegroundWindowAsync(target)) return;
+            if (NativeMethods.GetCursorPos(out _))
+            {
+                await Task.Run(() => _app.WindowHost.ClickAtCursor());
+            }
 
             var paste = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(140) };
-            paste.Tick += (_, _) =>
+            paste.Tick += async (_, _) =>
             {
                 paste.Stop();
-                _app.WindowHost.SendPaste();
+
+                if (!await _app.WindowHost.IsForegroundWindowAsync(target)) return;
+
+                await Task.Run(() => _app.WindowHost.SendPaste());
                 Services.ClipboardMonitor.Log($"dropped -> clicked at cursor and sent ctrl+v to {target}");
             };
             paste.Start();

@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Runtime.InteropServices;
+using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
 using System.Xml;
@@ -10,9 +11,9 @@ using Microsoft.Win32;
 namespace ExplorerDock.Services;
 
 /// <summary>
-/// 开机自启的注册。两个去处：
-///   ① 普通权限启动 → 写 <c>HKCU\...\Run</c>，登录时拉起本程序；
-///   ② 勾了「以管理员身份运行」→ 改用计划任务（<c>RunLevel=HighestAvailable</c>），登录时以管理员身份静默启动、不弹 UAC。
+/// 开机自启的注册。两个入口各管一种权限：
+///   ① <c>HKCU\...\Run</c> 只启动普通权限界面；
+///   ② 勾了「以管理员身份运行」时，计划任务只启动 <c>ExplorerDock.exe --host</c>。
 ///
 /// 为什么抽成一个独立类：创建最高权限的计划任务**需要管理员权限**，而界面进程从拆成
 /// 双进程之后就永远是普通权限（见 <c>App.OnStartup</c> 的注释）。所以 ② 只能交给提权的 <c>--host</c> 进程：
@@ -37,21 +38,30 @@ namespace ExplorerDock.Services;
 ///   顺带把 <c>&lt;Command&gt;</c> 写成不带引号的完整路径（XML 里没有命令行拆分的问题，坑 ① 从根上消失）。
 ///   <see cref="TaskIsUpToDate"/> 会连这些设置一起校验，于是历史上留下的坏任务在下次启动时被自动纠正。
 ///
-/// 还有一条兜底（2026-09-29 加）：勾了「以管理员身份运行」时，注册链路依赖一次 UAC 同意 ——
-///   界面进程先删 Run 键，任务却只有提权进程建得出来；用户在 UAC 上点「否」就变成两处都没有，
-///   下次开机什么都不启动，而且没有下一次自愈机会。现在改成 **任务确认合规之前不删 Run 键**：
-///   最坏情况退化成普通权限自启（单实例锁会吃掉重复启动的进程），不会出现"彻底不自启"。
+/// Run 键始终保留：它负责普通权限界面，计划任务只负责提权 Host。即使任务还没建好、
+/// 用户拒绝了一次 UAC，下次登录也至少能启动普通界面，并在 Host 启动后继续自愈任务。
+///
+/// 计划任务的安全描述符会给当前用户“读取 + 执行 + 删除”，但不给写入：普通界面因此
+/// 可以无 UAC 按需启动 Host，也不能改写最高权限任务的动作。
 ///
 /// 下面每个结果都写进 <c>%TEMP%\ExplorerDock.startup.log</c>，用户报"开机不自启"时一眼能看出坏在哪一步；
 /// <see cref="LogSnapshot"/> 还会把 Run 键 / StartupApproved / 任务设置 / 电源状态一起记下来。
 /// </summary>
 internal static class StartupRegistration
 {
+    internal enum ScheduledHostStartResult
+    {
+        NotReady,
+        LaunchAccepted,
+        LaunchFailed,
+    }
+
     private const string ValueName = "ExplorerDock";
     private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string StartupApprovedKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
     private const string TaskXmlFileName = "ExplorerDock.task.xml";
     private const string TaskNamespace = "http://schemas.microsoft.com/windows/2004/02/mit/task";
+    private const int HostTaskUserAccessMask = 0x001300A9;
 
     /// <summary>界面进程调用：按当前设置把 Run 键与计划任务同步成该有的样子。</summary>
     public static void Apply(bool runAtStartup, bool runElevated, string? exe)
@@ -66,29 +76,22 @@ internal static class StartupRegistration
             return;
         }
 
-        // 普通权限启动：Run 键就够了，任务不能留（否则登录时启动两次）
-        if (!runElevated)
-        {
-            WriteRunValue(exe!);
-            DeleteTask();
-            return;
-        }
+        // 界面始终从 Run 键以普通权限启动。任务创建失败也不能删掉这条，
+        // 否则用户拒绝一次 UAC 后，下次登录就什么都不启动了。
+        WriteRunValue(exe!);
 
-        // 提权启动：优先计划任务；任务没建成就把 Run 键留着兜底，下次开机至少还能以普通权限起来
-        bool taskReady = EnsureElevatedTask(exe);
-
-        if (taskReady)
+        if (runElevated)
         {
-            DeleteRunValue();
+            EnsureElevatedTask(exe);
         }
         else
         {
-            WriteRunValue(exe!, fallback: true);
+            DeleteTask();
         }
     }
 
     /// <summary>
-    /// 保证「登录时以最高权限运行」的计划任务存在、命令行完整、且电源/时限设置正确。
+    /// 保证「登录时以最高权限运行 Host」的计划任务存在、命令行完整、且电源/时限设置正确。
     /// 已经正确就直接返回 <c>true</c>，不做多余动作。返回 false 表示任务当前不可用（多半是没权限或被杀软拦了）。
     /// </summary>
     public static bool EnsureElevatedTask(string? exe)
@@ -130,7 +133,7 @@ internal static class StartupRegistration
 
         if (ok)
         {
-            AppendLog("startup-task: verify ok（Command 完整 + 电源/时限已解除）");
+            AppendLog("startup-task: verify ok（Host 命令行完整 + 电源/时限已解除）");
             return true;
         }
 
@@ -139,7 +142,34 @@ internal static class StartupRegistration
     }
 
     /// <summary>
-    /// 任务是否已经是"我们要的那一份"：命令行指向当前 exe，且三条关键设置都已解除限制。
+    /// 普通权限界面按需启动已经验证过的 Host 计划任务。
+    ///
+    /// 任务已存在时返回 true，调用方应等待 Host 通过命名管道连上来；任务缺失或仍是
+    /// 旧版“直接启动管理员界面”的命令时返回 false，由调用方回退到 UAC 启动 Host。
+    /// </summary>
+    internal static ScheduledHostStartResult TryStartElevatedTask(string? exe)
+    {
+        if (string.IsNullOrWhiteSpace(exe) || !TaskIsUpToDate(exe))
+        {
+            return ScheduledHostStartResult.NotReady;
+        }
+
+        var (rc, output) = RunSchtasks("/Run", "/TN", ValueName);
+
+        AppendLog($"startup-task: run/host rc={rc} out={Shorten(output)}");
+
+        return ClassifyTaskRunResult(rc);
+    }
+
+    internal static ScheduledHostStartResult ClassifyTaskRunResult(int exitCode)
+    {
+        return exitCode == 0
+            ? ScheduledHostStartResult.LaunchAccepted
+            : ScheduledHostStartResult.LaunchFailed;
+    }
+
+    /// <summary>
+    /// 任务是否已经是"我们要的那一份"：命令行只启动 Host、指向当前 exe，且三条关键设置都已解除限制。
     /// 旧版本用 schtasks 命令行建的任务在这里会被判为不合规 —— 于是被自动重建纠正。
     /// </summary>
     private static bool TaskIsUpToDate(string exe) => TaskIsUpToDate(ReadTaskXml() ?? string.Empty, exe);
@@ -149,11 +179,75 @@ internal static class StartupRegistration
     {
         if (string.IsNullOrWhiteSpace(xml)) return false;
         if (!CommandMatches(xml, exe)) return false;
+        if (!ArgumentsMatch(xml)) return false;
 
         return ReadNodeText(xml, "DisallowStartIfOnBatteries") is "false"
             && ReadNodeText(xml, "StopIfGoingOnBatteries") is "false"
             && string.Equals(ReadNodeText(xml, "ExecutionTimeLimit"), "PT0S", StringComparison.OrdinalIgnoreCase)
-            && string.Equals(ReadNodeText(xml, "RunLevel"), "HighestAvailable", StringComparison.OrdinalIgnoreCase);
+            && string.Equals(ReadNodeText(xml, "RunLevel"), "HighestAvailable", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(ReadTaskSettingsText(xml, "Enabled"), "false", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(ReadTaskSettingsText(xml, "AllowStartOnDemand"), "false", StringComparison.OrdinalIgnoreCase)
+            && SecurityDescriptorMatches(xml);
+    }
+
+    private static bool ArgumentsMatch(string xml)
+    {
+        var arguments = WebUtility.HtmlDecode(ReadNodeText(xml, "Arguments") ?? string.Empty);
+
+        return string.Equals(arguments.Trim().Trim('"'), "--host", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string? ReadTaskSettingsText(string xml, string tag)
+    {
+        try
+        {
+            var document = System.Xml.Linq.XDocument.Parse(xml);
+            var root = document.Root;
+            var ns = root?.Name.Namespace ?? System.Xml.Linq.XNamespace.None;
+
+            return root?
+                .Element(ns + "Settings")?
+                .Element(ns + tag)?
+                .Value
+                .Trim();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool SecurityDescriptorMatches(string xml)
+    {
+        var sddl = ReadNodeText(xml, "SecurityDescriptor");
+        var userId = ResolveUserId();
+
+        if (string.IsNullOrWhiteSpace(sddl) || string.IsNullOrWhiteSpace(userId)) return false;
+
+        try
+        {
+            var sid = new SecurityIdentifier(userId);
+            var descriptor = new RawSecurityDescriptor(sddl);
+
+            if (descriptor.DiscretionaryAcl is null) return false;
+
+            foreach (GenericAce ace in descriptor.DiscretionaryAcl)
+            {
+                if (ace is KnownAce known
+                    && known.AceType == AceType.AccessAllowed
+                    && known.SecurityIdentifier == sid
+                    && (known.AccessMask & HostTaskUserAccessMask) == HostTaskUserAccessMask)
+                {
+                    return true;
+                }
+            }
+        }
+        catch
+        {
+            return false;
+        }
+
+        return false;
     }
 
     /// <summary>查询任务的 XML；任务不存在或查询失败返回 null。</summary>
@@ -201,7 +295,7 @@ internal static class StartupRegistration
     /// 整份任务 XML。除了命令行，重点是三类设置：
     ///   · 电源：<c>false/false</c> —— 笔记本用电池时也启动、拔电源也不被结束（以前这里是默认的 true/true）；
     ///   · 时限：<c>PT0S</c>（无限）—— 常驻程序不会被"跑满 72 小时"杀掉（以前默认 PT72H）；
-    ///   · 触发：登录后延迟 10 秒，给资源管理器留出就绪时间；错过触发（关机中触发的登录）时补跑。
+    ///   · 触发：登录后延迟 10 秒作为兜底；普通界面启动时也会按需启动这个任务。
     /// </summary>
     private static string BuildTaskXml(string exe, string? userId)
     {
@@ -222,6 +316,12 @@ internal static class StartupRegistration
 
             writer.WriteStartElement("RegistrationInfo");
             writer.WriteElementString("Author", Environment.UserName);
+
+            if (!string.IsNullOrWhiteSpace(userId))
+            {
+                writer.WriteElementString("SecurityDescriptor", BuildSecurityDescriptor(userId));
+            }
+
             writer.WriteEndElement();
 
             writer.WriteStartElement("Triggers");
@@ -273,6 +373,7 @@ internal static class StartupRegistration
 
             // XML 里写完整路径（不写引号）—— schtasks 不会再按空格拆成 Command + Arguments
             writer.WriteElementString("Command", exe);
+            writer.WriteElementString("Arguments", "--host");
             writer.WriteEndElement();
             writer.WriteEndElement();
 
@@ -281,6 +382,12 @@ internal static class StartupRegistration
         }
 
         return builder.ToString();
+    }
+
+    private static string BuildSecurityDescriptor(string userId)
+    {
+        // 当前用户只拿到读取、执行和删除权限；改动任务定义仍需要管理员权限。
+        return $"D:(A;;FA;;;SY)(A;;FA;;;BA)(A;;0x{HostTaskUserAccessMask:X8};;;{userId})";
     }
 
     /// <summary>当前登录用户的标识（优先 SID，SID 拿不到才退回 域\用户名）。</summary>
@@ -308,11 +415,9 @@ internal static class StartupRegistration
         }
     }
 
-    /// <summary>写 Run 键。<paramref name="fallback"/> = true 表示提权任务还没就绪，这条只是兜底。</summary>
-    private static void WriteRunValue(string exe, bool fallback = false)
+    /// <summary>写普通权限界面的 Run 键。</summary>
+    private static void WriteRunValue(string exe)
     {
-        string note = fallback ? "（提权任务未就绪，保留兜底）" : string.Empty;
-
         try
         {
             // 关键：用 CreateSubKey。旧代码用 OpenSubKey(writable:true)，Run 键不存在时返回 null 被静默跳过，
@@ -321,7 +426,7 @@ internal static class StartupRegistration
 
             if (key is null)
             {
-                AppendLog($"run-key: 打开/创建 Run 键失败（返回 null）{note}");
+                AppendLog("run-key: 打开/创建 Run 键失败（返回 null）");
                 return;
             }
 
@@ -330,17 +435,17 @@ internal static class StartupRegistration
 
             if (string.Equals(before, value, StringComparison.Ordinal))
             {
-                AppendLog($"run-key: 已是目标值 value={value}{note}");
+                AppendLog($"run-key: 已是目标值 value={value}");
                 return;
             }
 
             key.SetValue(ValueName, value);
 
-            AppendLog($"run-key: 写入 value={value} 原值={(before is null ? "(无)" : before)}{note}");
+            AppendLog($"run-key: 写入 value={value} 原值={(before is null ? "(无)" : before)}");
         }
         catch (Exception ex)
         {
-            AppendLog($"run-key: 写入失败 {ex.Message}{note}");
+            AppendLog($"run-key: 写入失败 {ex.Message}");
         }
     }
 
@@ -451,7 +556,7 @@ internal static class StartupRegistration
 
         if (xml is null) return "不存在或查询失败";
 
-        return $"存在 command={ReadNodeText(xml, "Command")} " +
+        return $"存在 command={ReadNodeText(xml, "Command")} arguments={ReadNodeText(xml, "Arguments")} " +
                $"batteries={ReadNodeText(xml, "DisallowStartIfOnBatteries")}/{ReadNodeText(xml, "StopIfGoingOnBatteries")} " +
                $"limit={ReadNodeText(xml, "ExecutionTimeLimit")} runLevel={ReadNodeText(xml, "RunLevel")} " +
                $"delay={ReadNodeText(xml, "Delay")}";

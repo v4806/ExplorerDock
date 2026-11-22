@@ -18,7 +18,8 @@ namespace ExplorerDock.Services;
 /// </summary>
 internal sealed class HostRuntime : IDisposable
 {
-    private readonly LocalWindowHost _host = new();
+    // 远程链路只传 CardDto；图标由界面进程按 DTO 句柄取一次，宿主重复取出的结果会被丢掉。
+    private readonly LocalWindowHost _host = new(fillCardIcons: false);
     private readonly object _writeGate = new();
     private readonly ManualResetEventSlim _stop = new(false);
 
@@ -38,11 +39,27 @@ internal sealed class HostRuntime : IDisposable
     private readonly BlockingCollection<Action> _guiQueue = new();
     private Thread? _guiThread;
 
+    /// <summary>
+    /// 不要求 GUI 线程的窗口查询单独串行执行。
+    ///
+    /// 卡片枚举会读标题、虚拟桌面和 UI Automation，单个未响应窗口就可能让这一轮等上几秒。
+    /// 它如果和激活、前台查询共用 <see cref="_guiQueue"/>，一次慢查询就会把剪贴板和
+    /// 悬浮栏的点击一起堵住。
+    /// </summary>
+    private readonly BlockingCollection<Action> _inspectionQueue = new();
+    private Thread? _inspectionThread;
+
+    /// <summary>低级键盘钩子只把动作放进这里，由独立线程负责命名管道 I/O。</summary>
+    private readonly BlockingCollection<string> _keyActions = new();
+    private Thread? _keyActionThread;
+
     public void Run()
     {
         AltTabController.Log($"host: start pid={Environment.ProcessId} elevated={IsElevated()} injected={KeyboardHook.AllowInjected}");
 
         EnsureGuiThread();
+        EnsureInspectionThread();
+        StartKeyActionWriter();
 
         _host.SnapshotUpdated += OnSnapshot;
         _host.KeyAction += NotifyKeyAction;
@@ -63,7 +80,7 @@ internal sealed class HostRuntime : IDisposable
         // 界面进程永远是普通权限，所以由我们（提权进程）在这儿建/纠偏：
         //   ① 补建任务；
         //   ② 把旧版本用 schtasks 命令行建出来的任务改成正确的设置（电池可启动、无 72 小时时限）；
-        //   ③ 任务确认合规后，顺手清掉界面进程留下的兜底 Run 键。
+        //   ③ 任务只启动 --host，普通界面继续由 Run 键启动。
         // 任务已经正确时只跑一次 schtasks /Query，开销可以忽略。
         StartupRegistration.Apply(App.Settings.RunAtStartup, App.Settings.RunElevated, Environment.ProcessPath);
         StartupRegistration.LogSnapshot("host");
@@ -233,6 +250,62 @@ internal sealed class HostRuntime : IDisposable
         _guiThread.Start();
     }
 
+    private void EnsureInspectionThread()
+    {
+        if (_inspectionThread is not null) return;
+
+        _inspectionThread = new Thread(() =>
+        {
+            NativeMethods.PumpMessages();
+
+            foreach (var action in _inspectionQueue.GetConsumingEnumerable())
+            {
+                try
+                {
+                    action();
+                }
+                catch
+                {
+                    // 单个查询失败不影响后面的查询
+                }
+
+                NativeMethods.PumpMessages();
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "ExplorerDock.HostInspection",
+        };
+
+        _inspectionThread.SetApartmentState(ApartmentState.STA);
+        _inspectionThread.Start();
+    }
+
+    private void StartKeyActionWriter()
+    {
+        if (_keyActionThread is not null) return;
+
+        _keyActionThread = new Thread(() =>
+        {
+            foreach (var action in _keyActions.GetConsumingEnumerable())
+            {
+                if (_stream is null) continue;
+
+                Send(new HostMessage
+                {
+                    Cmd = HostProtocol.CmdKeyAction,
+                    Action = action,
+                });
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "ExplorerDock.KeyActionWriter",
+        };
+
+        _keyActionThread.Start();
+    }
+
     /// <summary>把窗口操作放到 GUI 线程上执行并等结果（已经在该线程上时直接执行，避免自等死锁）。</summary>
     /// <summary>GUI 线程忙过这个时长，就不再往队列里塞新命令（塞进去只会让每个调用方各等 8 秒）。</summary>
     private const int GuiBusySkipMs = 1200;
@@ -337,6 +410,35 @@ internal sealed class HostRuntime : IDisposable
             {
                 ApplyKeyState(message);
                 Reply(message);
+                continue;
+            }
+
+            // 这几条只查前台/按键，或直接注入一次按键，不需要进入串行 GUI 队列。
+            // 尤其 is_foreground 会被剪贴板面板每 300ms 查询一次，不能排在慢窗口操作后面。
+            if (message.Cmd is HostProtocol.CmdIsForeground
+                or HostProtocol.CmdIsLeftDown
+                or HostProtocol.CmdSendPaste
+                or HostProtocol.CmdSendAltUp
+                or HostProtocol.CmdClickCursor)
+            {
+                Handle(message);
+                continue;
+            }
+
+            // 枚举、恢复任务栏等慢命令放到独立 STA 队列后继续读取下一条请求。
+            if (message.Cmd is HostProtocol.CmdCards
+                or HostProtocol.CmdProcessCards
+                or HostProtocol.CmdRunningProcesses
+                or HostProtocol.CmdTakeover
+                or HostProtocol.CmdRestoreAll)
+            {
+                if (!_inspectionQueue.TryAdd(() => Handle(message)))
+                {
+                    message.Ok = false;
+                    message.Error = "host inspection queue stopped";
+                    Reply(message);
+                }
+
                 continue;
             }
 
@@ -609,12 +711,13 @@ internal sealed class HostRuntime : IDisposable
         }
     }
 
-    /// <summary>把接管到的按键动作推给界面（钩子线程调用，写管道有锁保护）。</summary>
+    /// <summary>把接管到的按键动作推给界面。这里必须立即返回，绝不能等命名管道。</summary>
     private void NotifyKeyAction(string action)
     {
-        if (_stream is null) return;
-
-        Send(new HostMessage { Cmd = HostProtocol.CmdKeyAction, Action = action });
+        if (!_keyActions.TryAdd(action))
+        {
+            AltTabController.Log($"host: key action dropped after queue stopped: {action}");
+        }
     }
 
     private void OnSnapshot(ExplorerDock.Models.ExplorerSnapshot snapshot)
@@ -652,6 +755,8 @@ internal sealed class HostRuntime : IDisposable
     public void Dispose()
     {
         _stop.Set();
+        _keyActions.CompleteAdding();
+        _inspectionQueue.CompleteAdding();
         Close();
     }
 

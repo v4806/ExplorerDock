@@ -49,11 +49,11 @@ internal static class WindowPaste
 
         var settle = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(SettleMs) };
 
-        settle.Tick += (_, _) =>
+        settle.Tick += async (_, _) =>
         {
             settle.Stop();
 
-            app.WindowHost.Activate(hwnd, tabIndex);
+            await app.WindowHost.ActivateAsync(hwnd, tabIndex);
             Confirm(app, hwnd, tabIndex, 0);
         };
 
@@ -66,17 +66,28 @@ internal static class WindowPaste
     /// 切标签（多标签资源管理器窗口）走的是 UI Automation，比单纯切前台慢，
     /// 前台没站稳就发键，这次 Ctrl+V 会打到别的窗口上。
     /// </summary>
-    private static void Confirm(App app, IntPtr hwnd, int tabIndex, int attempt)
+    private static async void Confirm(App app, IntPtr hwnd, int tabIndex, int attempt)
     {
         int delay = attempt == 0 ? (tabIndex >= 0 ? 420 : 180) : 250;
 
         var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(delay) };
 
-        timer.Tick += (_, _) =>
+        timer.Tick += async (_, _) =>
         {
             timer.Stop();
 
-            if (!app.WindowHost.IsForegroundWindow(hwnd))
+            bool foreground;
+
+            try
+            {
+                foreground = await app.WindowHost.IsForegroundWindowAsync(hwnd);
+            }
+            catch
+            {
+                foreground = false;
+            }
+
+            if (!foreground)
             {
                 if (attempt >= MaxForegroundAttempts)
                 {
@@ -84,7 +95,7 @@ internal static class WindowPaste
                     return;
                 }
 
-                app.WindowHost.Activate(hwnd, attempt == 0 ? tabIndex : -1);
+                await app.WindowHost.ActivateAsync(hwnd, attempt == 0 ? tabIndex : -1);
                 Confirm(app, hwnd, tabIndex, attempt + 1);
                 return;
             }
@@ -94,7 +105,8 @@ internal static class WindowPaste
             // 这是**真正让拖放粘进文件夹窗口的那条路**（实测确认）：Ctrl+V 只落在"有键盘焦点的控件"上，
             // 而窗口刚被激活 / 刚切过标签时焦点常常不在文件列表里，补的 Ctrl+V 会粘不上
             // （表现为"切过去直接 Ctrl+V 没反应，得先点一下文件区"）。
-            if (App.IsFileManagerWindow(hwnd) && app.WindowHost.PasteIntoFolder(hwnd))
+            if (App.IsFileManagerWindow(hwnd)
+                && await Task.Run(() => app.WindowHost.PasteIntoFolder(hwnd)))
             {
                 ClipboardMonitor.Log($"paste -> hwnd=0x{hwnd.ToInt64():X} tab={tabIndex} via=uia");
                 return;
@@ -103,11 +115,12 @@ internal static class WindowPaste
             // 其他程序（QQ、Blender 这类）以及命令没找到时的兜底：补一次 Ctrl+V
             var paste = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(AfterActivateMs) };
 
-            paste.Tick += (_, _) =>
+            paste.Tick += async (_, _) =>
             {
                 paste.Stop();
 
-                app.WindowHost.SendPaste();
+                if (!await app.WindowHost.IsForegroundWindowAsync(hwnd)) return;
+                await Task.Run(() => app.WindowHost.SendPaste());
                 ClipboardMonitor.Log($"paste -> hwnd=0x{hwnd.ToInt64():X} tab={tabIndex}");
             };
 

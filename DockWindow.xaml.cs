@@ -2813,7 +2813,7 @@ public partial class DockWindow : Window
     }
 
     /// <summary>悬停计时器到点：把悬停住的这个窗口呼到前台（已经在前面就不动它）。</summary>
-    private void OnDragHoverTimerTick()
+    private async void OnDragHoverTimerTick()
     {
         _dragHoverTimer.Stop();
 
@@ -2821,11 +2821,20 @@ public partial class DockWindow : Window
         if (pending.Handle == IntPtr.Zero) return;
         if (_dragHoverActivated == pending) return;
 
-        _dragHoverActivated = pending;
-
         // 已经在前台就别再折腾一遍：SetForegroundWindow/SetFocus 会让窗口闪一下
-        if (pending.TabIndex < 0 && Host.WindowHost.IsForegroundWindow(pending.Handle)) return;
+        if (pending.TabIndex < 0)
+        {
+            try
+            {
+                if (await Host.WindowHost.IsForegroundWindowAsync(pending.Handle)) return;
+            }
+            catch
+            {
+                return;
+            }
+        }
 
+        _dragHoverActivated = pending;
         Diag($"drag hover -> activate 0x{pending.Handle.ToInt64():X} tab={pending.TabIndex}");
         Activate(pending.Handle, pending.TabIndex);
     }
@@ -2912,7 +2921,22 @@ public partial class DockWindow : Window
     {
         if (!NativeMethods.IsWindow(hwnd)) return;
 
-        var ok = Host.WindowHost.Activate(hwnd, tabIndex);
+        _ = ActivateAsync(hwnd, tabIndex);
+    }
+
+    private async Task ActivateAsync(IntPtr hwnd, int tabIndex)
+    {
+        bool ok;
+
+        try
+        {
+            ok = await Host.WindowHost.ActivateAsync(hwnd, tabIndex);
+        }
+        catch
+        {
+            return;
+        }
+
         Diag($"activate: target=0x{hwnd.ToInt64():X} tab={tabIndex} ok={ok} fg=0x{NativeMethods.GetForegroundWindow().ToInt64():X}");
 
         if (ok) SetActiveWindow(hwnd, tabIndex);

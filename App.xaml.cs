@@ -18,6 +18,7 @@ public partial class App : Application
 
     private Mutex? _mutex;
     private EventWaitHandle? _quitEvent;
+    private Mutex? _hostMutex;
     private IWindowHost? _windowHost;
     private TrayIconManager? _tray;
     private TaskbarTweaker? _taskbar;
@@ -291,6 +292,16 @@ public partial class App : Application
             return;
         }
 
+        // 旧版计划任务会直接把界面提权。先在提权上下文里修好启动注册，
+        // 再从 Explorer 启动一份普通权限界面；Host 会按设置另行提权。
+        if (IsElevated)
+        {
+            AltTabController.Log("ui: elevated launch, restarting as standard user");
+            RestartNormal();
+            Shutdown();
+            return;
+        }
+
         // 界面进程**不再请求提权**：需要管理员权限的事都交给 --host 进程去做，
         // 界面保持普通权限，才能正常接收资源管理器这类普通权限程序发来的消息。
         // （提权与否由 Settings.RunElevated 决定 --host 的启动方式）
@@ -426,6 +437,27 @@ public partial class App : Application
     /// </summary>
     private void RunAsHost()
     {
+        try
+        {
+            _hostMutex = new Mutex(
+                initiallyOwned: true,
+                @"Local\ExplorerDock.Host.SingleInstance.v1",
+                out bool createdNew);
+
+            if (!createdNew)
+            {
+                AltTabController.Log("host: another host instance is already active");
+                _hostMutex.Dispose();
+                _hostMutex = null;
+                Shutdown();
+                return;
+            }
+        }
+        catch (Exception ex)
+        {
+            AltTabController.Log($"host: single-instance guard failed {ex.GetType().Name}: {ex.Message}");
+        }
+
         var runtime = new HostRuntime();
 
         var thread = new Thread(() => runtime.Run())
@@ -436,44 +468,21 @@ public partial class App : Application
 
         thread.Start();
 
-        Exit += (_, _) => runtime.Dispose();
-    }
-
-    public void RestartElevated()
-    {
-        try
+        Exit += (_, _) =>
         {
-            var exe = Environment.ProcessPath;
-            if (string.IsNullOrWhiteSpace(exe)) return;
+            runtime.Dispose();
 
-            Process.Start(new ProcessStartInfo(exe)
+            try
             {
-                UseShellExecute = true,
-                Verb = "runas",
-                Arguments = BuildRelaunchArguments(),
-            });
-        }
-        catch
-        {
-            // 用户在 UAC 弹窗上点了"否"：那就什么都不做，继续用普通权限跑着
-            return;
-        }
+                _hostMutex?.ReleaseMutex();
+            }
+            catch
+            {
+                // 进程退出时系统会释放
+            }
 
-        ExitApp();
-    }
-
-    /// <summary>重启时把原始命令行参数原样带上（调试开关要能穿过提权重启）。</summary>
-    private static string BuildRelaunchArguments()
-    {
-        var parts = new List<string> { "--relaunch" };
-
-        foreach (var arg in Environment.GetCommandLineArgs().Skip(1))
-        {
-            if (arg.Equals("--relaunch", StringComparison.OrdinalIgnoreCase)) continue;
-            parts.Add(arg.Contains(' ') ? $"\"{arg}\"" : arg);
-        }
-
-        return string.Join(' ', parts);
+            _hostMutex?.Dispose();
+        };
     }
 
     /// <summary>降回普通权限重启（提权状态下取消勾选时走这条）。</summary>
@@ -1623,9 +1632,8 @@ public partial class App : Application
     /// <summary>
     /// 让自启与设置保持一致。
     ///
-    /// 分成两条路：普通权限写注册表 Run 键就够了；
-    /// 选了「以管理员身份运行」就得改用计划任务 —— Run 键拉起来的进程提不了权，
-    /// 而计划任务能标 /RL HIGHEST，登录时静默地以管理员身份跑起来，不弹 UAC。
+    /// Run 键始终负责启动普通权限界面；选了「以管理员身份运行」时，
+    /// 计划任务另行以最高权限启动 <c>--host</c>，两者不能再互换。
     /// </summary>
     private void ApplyStartupRegistration()
     {

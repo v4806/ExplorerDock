@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Windows.Media;
 using ExplorerDock.Interop;
 using ExplorerDock.Models;
@@ -13,8 +14,12 @@ internal sealed class LocalWindowHost : IWindowHost
 {
     private readonly ExplorerWatcher _watcher = new();
     private readonly HostKeyboard _keyboard;
+    private readonly bool _fillCardIcons;
+    private readonly BlockingCollection<Action> _activationQueue = new();
+    private readonly object _activationGate = new();
+    private Thread? _activationThread;
 
-    public LocalWindowHost(bool takeoverEnabled = true, bool takeoverExplorer = true)
+    public LocalWindowHost(bool takeoverEnabled = true, bool takeoverExplorer = true, bool fillCardIcons = true)
     {
         // 接管范围（自动接管开关 + 手动名单）由宿主侧判定：本地实现就是本进程
         TakeoverState.SetScope(App.Settings.AutoTakeoverMultiWindow, App.Settings.TakeoverProcesses);
@@ -26,6 +31,7 @@ internal sealed class LocalWindowHost : IWindowHost
         _watcher.SnapshotUpdated += snapshot => SnapshotUpdated?.Invoke(snapshot);
 
         _keyboard = new HostKeyboard(action => KeyAction?.Invoke(action));
+        _fillCardIcons = fillCardIcons;
     }
 
     public event Action<ExplorerSnapshot>? SnapshotUpdated;
@@ -86,6 +92,9 @@ internal sealed class LocalWindowHost : IWindowHost
         return ok;
     }
 
+    public Task<bool> ActivateAsync(IntPtr hwnd, int tabIndex)
+        => RunOnActivationThreadAsync(() => Activate(hwnd, tabIndex));
+
     public void Minimize(IntPtr hwnd)
     {
         if (!NativeMethods.IsWindow(hwnd)) return;
@@ -100,7 +109,7 @@ internal sealed class LocalWindowHost : IWindowHost
         var items = AltTabWindowList.Snapshot();
 
         // 图标还是在这一侧取（跨进程时图标句柄传不过去，所以这一步留在原地最省事）
-        FillIcons(items);
+        if (_fillCardIcons) FillIcons(items);
 
         return items;
     }
@@ -108,7 +117,7 @@ internal sealed class LocalWindowHost : IWindowHost
     public List<AltTabWindowInfo> ProcessCards(IntPtr hwnd)
     {
         var items = AltTabWindowList.ProcessWindows(hwnd);
-        FillIcons(items);
+        if (_fillCardIcons) FillIcons(items);
 
         return items;
     }
@@ -134,10 +143,15 @@ internal sealed class LocalWindowHost : IWindowHost
 
     public bool IsForegroundWindow(IntPtr hwnd) => NativeMethods.GetForegroundWindow() == hwnd;
 
+    public Task<bool> IsForegroundWindowAsync(IntPtr hwnd)
+        => RunOnActivationThreadAsync(() => IsForegroundWindow(hwnd));
+
     public bool IsLeftButtonDown() => NativeMethods.IsKeyDown(0x01);   // VK_LBUTTON
 
     public void Dispose()
     {
+        _activationQueue.CompleteAdding();
+
         try
         {
             _keyboard.Dispose();
@@ -154,6 +168,56 @@ internal sealed class LocalWindowHost : IWindowHost
         catch
         {
             // 退出流程里忽略
+        }
+    }
+
+    private Task<T> RunOnActivationThreadAsync<T>(Func<T> work)
+    {
+        EnsureActivationThread();
+
+        var completion = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        if (!_activationQueue.TryAdd(() =>
+            {
+                try
+                {
+                    completion.SetResult(work());
+                }
+                catch (Exception ex)
+                {
+                    completion.SetException(ex);
+                }
+            }))
+        {
+            completion.SetException(new ObjectDisposedException(nameof(LocalWindowHost)));
+        }
+
+        return completion.Task;
+    }
+
+    private void EnsureActivationThread()
+    {
+        lock (_activationGate)
+        {
+            if (_activationThread is not null) return;
+
+            _activationThread = new Thread(() =>
+            {
+                NativeMethods.PumpMessages();
+
+                foreach (var action in _activationQueue.GetConsumingEnumerable())
+                {
+                    action();
+                    NativeMethods.PumpMessages();
+                }
+            })
+            {
+                IsBackground = true,
+                Name = "ExplorerDock.LocalActivate",
+            };
+
+            _activationThread.SetApartmentState(ApartmentState.STA);
+            _activationThread.Start();
         }
     }
 

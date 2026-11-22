@@ -5,6 +5,7 @@ using System.Reflection;
 using System.ComponentModel;
 using System.Threading;
 using System.Text.Json;
+using System.Xml.Linq;
 
 var failures = 0;
 
@@ -214,6 +215,250 @@ Run("host clipboard takeover starts disabled until UI arms it", () =>
     False("default host clipboard takeover", enabled ?? true);
 });
 
+Run("foreground watch hides only after the panel loses foreground", () =>
+{
+    var shouldHide = typeof(ClipboardPanel).GetMethod(
+        "ShouldHideAfterForegroundCheck",
+        BindingFlags.Static | BindingFlags.NonPublic)
+        ?? throw new InvalidOperationException("ShouldHideAfterForegroundCheck not found");
+
+    bool Check(bool panelIsForeground, bool panelIsVisible, bool samePresentation)
+        => (bool)(shouldHide.Invoke(
+            null,
+            new object[] { panelIsForeground, panelIsVisible, samePresentation })
+            ?? throw new InvalidOperationException("ShouldHideAfterForegroundCheck returned null"));
+
+    False(
+        "panel stays open while foreground",
+        Check(panelIsForeground: true, panelIsVisible: true, samePresentation: true));
+
+    True(
+        "panel hides after another window takes foreground",
+        Check(panelIsForeground: false, panelIsVisible: true, samePresentation: true));
+
+    False(
+        "hidden panel ignores stale foreground result",
+        Check(panelIsForeground: false, panelIsVisible: false, samePresentation: true));
+
+    False(
+        "new presentation ignores old foreground result",
+        Check(panelIsForeground: false, panelIsVisible: true, samePresentation: false));
+});
+
+Run("elevated startup task launches only the host", () =>
+{
+    const string exe = @"D:\Program Files\ExplorerDock\ExplorerDock.exe";
+    var sid = System.Security.Principal.WindowsIdentity.GetCurrent().User?.Value
+        ?? throw new InvalidOperationException("current user SID not found");
+    XNamespace ns = "http://schemas.microsoft.com/windows/2004/02/mit/task";
+
+    var build = typeof(StartupRegistration).GetMethod("BuildTaskXml", BindingFlags.Static | BindingFlags.NonPublic)
+        ?? throw new InvalidOperationException("BuildTaskXml not found");
+
+    var xml = (string)(build.Invoke(null, new object?[] { exe, sid })
+        ?? throw new InvalidOperationException("BuildTaskXml returned null"));
+
+    var document = XDocument.Parse(xml);
+    var arguments = document.Descendants(ns + "Arguments").SingleOrDefault()?.Value;
+    var securityDescriptor = document.Descendants(ns + "SecurityDescriptor").SingleOrDefault()?.Value;
+    var isUpToDate = typeof(StartupRegistration).GetMethod(
+        "TaskIsUpToDate",
+        BindingFlags.Static | BindingFlags.NonPublic,
+        binder: null,
+        types: new[] { typeof(string), typeof(string) },
+        modifiers: null)
+        ?? throw new InvalidOperationException("TaskIsUpToDate not found");
+
+    Equal("scheduled action arguments", "--host", arguments ?? "(missing)");
+    True(
+        "standard user can execute the host task",
+        securityDescriptor?.Contains(sid, StringComparison.OrdinalIgnoreCase) == true
+        && securityDescriptor.Contains("0x001300A9", StringComparison.OrdinalIgnoreCase));
+
+    if (securityDescriptor is null) throw new InvalidOperationException("SecurityDescriptor missing");
+    new System.Security.AccessControl.RawSecurityDescriptor(securityDescriptor);
+
+    True(
+        "generated task is current",
+        (bool)(isUpToDate.Invoke(null, new object[] { xml, exe }) ?? false));
+});
+
+Run("legacy elevated UI startup task is rejected", () =>
+{
+    const string exe = @"D:\Program Files\ExplorerDock\ExplorerDock.exe";
+    var sid = System.Security.Principal.WindowsIdentity.GetCurrent().User?.Value
+        ?? throw new InvalidOperationException("current user SID not found");
+    XNamespace ns = "http://schemas.microsoft.com/windows/2004/02/mit/task";
+
+    var build = typeof(StartupRegistration).GetMethod("BuildTaskXml", BindingFlags.Static | BindingFlags.NonPublic)
+        ?? throw new InvalidOperationException("BuildTaskXml not found");
+    var isUpToDate = typeof(StartupRegistration).GetMethod(
+        "TaskIsUpToDate",
+        BindingFlags.Static | BindingFlags.NonPublic,
+        binder: null,
+        types: new[] { typeof(string), typeof(string) },
+        modifiers: null)
+        ?? throw new InvalidOperationException("TaskIsUpToDate not found");
+
+    var xml = (string)(build.Invoke(null, new object?[] { exe, sid })
+        ?? throw new InvalidOperationException("BuildTaskXml returned null"));
+    var document = XDocument.Parse(xml);
+    document.Descendants(ns + "Arguments").Remove();
+
+    var current = (bool)(isUpToDate.Invoke(null, new object[] { document.ToString(SaveOptions.DisableFormatting), exe })
+        ?? throw new InvalidOperationException("TaskIsUpToDate returned null"));
+
+    False("legacy elevated UI task", current);
+});
+
+Run("scheduled host task without launch ACL is rejected", () =>
+{
+    const string exe = @"D:\Program Files\ExplorerDock\ExplorerDock.exe";
+    var sid = System.Security.Principal.WindowsIdentity.GetCurrent().User?.Value
+        ?? throw new InvalidOperationException("current user SID not found");
+    XNamespace ns = "http://schemas.microsoft.com/windows/2004/02/mit/task";
+
+    var build = typeof(StartupRegistration).GetMethod("BuildTaskXml", BindingFlags.Static | BindingFlags.NonPublic)
+        ?? throw new InvalidOperationException("BuildTaskXml not found");
+    var isUpToDate = typeof(StartupRegistration).GetMethod(
+        "TaskIsUpToDate",
+        BindingFlags.Static | BindingFlags.NonPublic,
+        binder: null,
+        types: new[] { typeof(string), typeof(string) },
+        modifiers: null)
+        ?? throw new InvalidOperationException("TaskIsUpToDate not found");
+
+    var xml = (string)(build.Invoke(null, new object?[] { exe, sid })
+        ?? throw new InvalidOperationException("BuildTaskXml returned null"));
+    var document = XDocument.Parse(xml);
+    document.Descendants(ns + "SecurityDescriptor").Remove();
+
+    var current = (bool)(isUpToDate.Invoke(
+        null,
+        new object[] { document.ToString(SaveOptions.DisableFormatting), exe })
+        ?? throw new InvalidOperationException("TaskIsUpToDate returned null"));
+
+    False("task without launch ACL", current);
+});
+
+Run("disabled scheduled host task is rejected", () =>
+{
+    const string exe = @"D:\Program Files\ExplorerDock\ExplorerDock.exe";
+    var sid = System.Security.Principal.WindowsIdentity.GetCurrent().User?.Value
+        ?? throw new InvalidOperationException("current user SID not found");
+    XNamespace ns = "http://schemas.microsoft.com/windows/2004/02/mit/task";
+
+    var build = typeof(StartupRegistration).GetMethod("BuildTaskXml", BindingFlags.Static | BindingFlags.NonPublic)
+        ?? throw new InvalidOperationException("BuildTaskXml not found");
+    var isUpToDate = typeof(StartupRegistration).GetMethod(
+        "TaskIsUpToDate",
+        BindingFlags.Static | BindingFlags.NonPublic,
+        binder: null,
+        types: new[] { typeof(string), typeof(string) },
+        modifiers: null)
+        ?? throw new InvalidOperationException("TaskIsUpToDate not found");
+
+    var xml = (string)(build.Invoke(null, new object?[] { exe, sid })
+        ?? throw new InvalidOperationException("BuildTaskXml returned null"));
+    var document = XDocument.Parse(xml);
+    var settingsEnabled = document.Root?
+        .Element(ns + "Settings")?
+        .Element(ns + "Enabled");
+    var allowStartOnDemand = document.Root?
+        .Element(ns + "Settings")?
+        .Element(ns + "AllowStartOnDemand");
+
+    if (settingsEnabled is null) throw new InvalidOperationException("Settings/Enabled not found");
+    if (allowStartOnDemand is null) throw new InvalidOperationException("Settings/AllowStartOnDemand not found");
+    settingsEnabled.Value = "false";
+
+    var current = (bool)(isUpToDate.Invoke(
+        null,
+        new object[] { document.ToString(SaveOptions.DisableFormatting), exe })
+        ?? throw new InvalidOperationException("TaskIsUpToDate returned null"));
+
+    False("disabled scheduled task", current);
+
+    settingsEnabled.Value = "true";
+    allowStartOnDemand.Value = "false";
+
+    var onDemandDisabled = (bool)(isUpToDate.Invoke(
+        null,
+        new object[] { document.ToString(SaveOptions.DisableFormatting), exe })
+        ?? throw new InvalidOperationException("TaskIsUpToDate returned null"));
+
+    False("scheduled task without on-demand start", onDemandDisabled);
+});
+
+Run("scheduled host start failure requests direct fallback", () =>
+{
+    var classify = typeof(StartupRegistration).GetMethod(
+        "ClassifyTaskRunResult",
+        BindingFlags.Static | BindingFlags.NonPublic)
+        ?? throw new InvalidOperationException("ClassifyTaskRunResult not found");
+
+    string Result(int exitCode)
+        => classify.Invoke(null, new object[] { exitCode })?.ToString()
+            ?? throw new InvalidOperationException("ClassifyTaskRunResult returned null");
+
+    Equal("accepted task launch", "LaunchAccepted", Result(0));
+    Equal("failed task launch", "LaunchFailed", Result(1));
+});
+
+Run("setup wizard restarts only to demote UI or apply host mode", () =>
+{
+    var initialValue = typeof(SetupWizardWindow).GetMethod(
+        "ResolveInitialRunElevated",
+        BindingFlags.Static | BindingFlags.NonPublic)
+        ?? throw new InvalidOperationException("ResolveInitialRunElevated not found");
+    var shouldRestart = typeof(SetupWizardWindow).GetMethod(
+        "ShouldRestartNormal",
+        BindingFlags.Static | BindingFlags.NonPublic)
+        ?? throw new InvalidOperationException("ShouldRestartNormal not found");
+
+    bool Initial(bool setupCompleted, bool currentRunElevated)
+        => (bool)(initialValue.Invoke(
+            null,
+            new object[] { setupCompleted, currentRunElevated })
+            ?? throw new InvalidOperationException("ResolveInitialRunElevated returned null"));
+
+    bool Check(bool uiElevated, bool previousRunElevated, bool selectedRunElevated)
+        => (bool)(shouldRestart.Invoke(
+            null,
+            new object[] { uiElevated, previousRunElevated, selectedRunElevated })
+            ?? throw new InvalidOperationException("ShouldRestartNormal returned null"));
+
+    True("first setup defaults to administrator host", Initial(false, false));
+    False("reopened setup preserves host off", Initial(true, false));
+    False("normal UI with unchanged host mode stays running", Check(false, true, true));
+    True("elevated UI is demoted", Check(true, true, true));
+    True("changing host mode restarts UI", Check(false, false, true));
+    True("disabling host mode restarts UI", Check(false, true, false));
+});
+
+Run("stale panel false cannot disarm swallowed Alt+Tab", () =>
+{
+    var actions = new List<string>();
+    using var keyboard = new HostKeyboard(actions.Add);
+
+    var onKey = typeof(HostKeyboard).GetMethod("OnKey", BindingFlags.Instance | BindingFlags.NonPublic)
+        ?? throw new InvalidOperationException("OnKey not found");
+    var panelOpen = typeof(HostKeyboard).GetField("_panelOpen", BindingFlags.Instance | BindingFlags.NonPublic)
+        ?? throw new InvalidOperationException("_panelOpen not found");
+
+    var send = (KeyStroke stroke) => (bool)(onKey.Invoke(keyboard, new object[] { stroke }) ?? false);
+
+    False("Alt down passes", send(Key(KeyboardHook.VK_LMENU, down: true, altDown: true)));
+    True("Alt+Tab down is swallowed", send(Key(KeyboardHook.VK_TAB, down: true, altDown: true)));
+
+    keyboard.SetState(altTabTakeover: true, clipboardTakeover: false, panelOpen: false, fullscreenPassthrough: true);
+    True("panel stays armed while Alt is down", panelOpen.GetValue(keyboard) is true);
+
+    True("Alt up is swallowed", send(Key(KeyboardHook.VK_LMENU, down: false)));
+    Equal("Alt up still commits", HostProtocol.KeyCommit, actions.Last());
+    False("panel disarmed after Alt up", panelOpen.GetValue(keyboard) is true);
+});
+
 Run("clipboard listener registration failure propagates", () =>
 {
     Exception? captured = null;
@@ -395,8 +640,8 @@ static void Equal<T>(string name, T expected, T actual)
     }
 }
 
-static KeyStroke Key(int vk, bool down)
-    => new(vk, down, altDown: false, injected: false);
+static KeyStroke Key(int vk, bool down, bool altDown = false)
+    => new(vk, down, altDown, injected: false);
 
 static void Press(HashSet<int> keys, int vk) => keys.Add(vk);
 
